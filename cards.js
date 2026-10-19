@@ -29,6 +29,9 @@ const SHOOB_ENCRYPTION_SECRET =
   "nQQrx5S5rItE5HT76bqJeNpQ1Wgvw3dhWCjmkha939kqzIOnQA9b9DnnYj6aeLdV" +
   "VAviHzvq8iQZludOBwKknbOnJNOATdKQHmsbF8NmNcq";
 
+/**
+ * Return the first non-empty value from an object key list.
+ */
 function first(obj, ...keys) {
   if (!obj || typeof obj !== "object") return null;
   for (const key of keys) {
@@ -48,6 +51,9 @@ function extractSeries(card) {
   return String(value);
 }
 
+/**
+ * Decrypt one value using Shoob's browser client Cryptr-compatible format (AES-256-CTR).
+ */
 function decryptShoobValue(hexValue) {
   const raw = Buffer.from(hexValue, "hex");
   const iv = raw.subarray(0, 16);
@@ -74,15 +80,16 @@ function normalizeCard(card) {
   }
 
   const strId = String(cardId);
+  const author = Array.isArray(card.authors) && card.authors[0] ? card.authors[0] : null;
+
   return {
-    // Preserve EVERY raw field Shoob sends (creator, artist, rarity, stats, …)
-    ...card,
-    // Normalized fields added on top — consistent shape across all cards
     id: strId,
     name: String(name),
     tier: String(tier),
     series: extractSeries(card),
     image_url: `https://api.shoob.gg/site/api/cardr/${strId}?size=700`,
+    author: author?.name ? String(author.name) : "Anonymous",
+    author_link: author?.link ? String(author.link) : "Hidden",
   };
 }
 
@@ -143,7 +150,7 @@ class ShoobCardScraper {
     this.category = category;
     this.cards = [];
     this.responseEvent = "cardindexres";
-    this.expectedTotal = null; // ← exposed to server so UI can show a progress bar
+    this.expectedTotal = null;
   }
 
   async fetchAll() {
@@ -192,7 +199,7 @@ class ShoobCardScraper {
             if (respPages !== null) totalPages = respPages;
             if (respTotal !== null) {
               totalDocs = respTotal;
-              this.expectedTotal = respTotal; // ← update exposed count
+              this.expectedTotal = respTotal;
             }
 
             if (docs.length === 0) break;
