@@ -1,4 +1,4 @@
-// server.js 
+// server.js
 
 const express = require("express");
 const path = require("node:path");
@@ -18,6 +18,10 @@ let activeScraper = null;
 let scrapeState = { isScraping: false, startedAt: null, finishedAt: null, error: null };
 
 let currentEventCards = null;
+let currentEventStats = null;
+let currentUnknownEvents = null;     // ← NEW: menu slugs not in KNOWN_EVENTS
+let currentMenuChecked = null;       // ← NEW: true if preflight succeeded
+let currentMenuError = null;         // ← NEW: reason if preflight failed
 let activeEventScraper = null;
 let eventScrapeState = { isScraping: false, startedAt: null, finishedAt: null, error: null };
 
@@ -62,7 +66,18 @@ app.get(["/api/health", "/ping"], (req, res) => {
     timestamp: getTimeInfo(),
     server: { uptime_seconds: Math.floor(uptimeSec), uptime_human: formatUptime(uptimeSec), node: process.version, port: PORT, memory_mb: { rss: +(mem.rss / 1024 / 1024).toFixed(2), heap_used: +(mem.heapUsed / 1024 / 1024).toFixed(2) } },
     mainScraper: { isScraping: scrapeState.isScraping, startedAt: scrapeState.startedAt, finishedAt: scrapeState.finishedAt, error: scrapeState.error, cardCount: currentCardCount(), downloadable: currentCardCount() > 0, downloadStatus: currentCardCount() === 0 ? "empty" : scrapeState.isScraping ? "partial" : "complete" },
-    eventScraper: { isScraping: eventScrapeState.isScraping, startedAt: eventScrapeState.startedAt, finishedAt: eventScrapeState.finishedAt, error: eventScrapeState.error, cardCount: currentEventCardCount(), phase: activeEventScraper?.phase || (eventScrapeState.finishedAt ? "done" : "idle"), downloadable: currentEventCardCount() > 0, downloadStatus: currentEventCardCount() === 0 ? "empty" : eventScrapeState.isScraping ? "partial" : "complete" },
+    eventScraper: {
+      isScraping: eventScrapeState.isScraping,
+      startedAt: eventScrapeState.startedAt,
+      finishedAt: eventScrapeState.finishedAt,
+      error: eventScrapeState.error,
+      cardCount: currentEventCardCount(),
+      phase: activeEventScraper?.phase || (eventScrapeState.finishedAt ? "done" : "idle"),
+      downloadable: currentEventCardCount() > 0,
+      downloadStatus: currentEventCardCount() === 0 ? "empty" : eventScrapeState.isScraping ? "partial" : "complete",
+      unknownEvents: activeEventScraper?.unknownEvents ?? currentUnknownEvents ?? [],
+      menuChecked: activeEventScraper?.menuChecked ?? currentMenuChecked ?? null,
+    },
     available_endpoints: AVAILABLE_ENDPOINTS,
   });
 });
@@ -113,11 +128,19 @@ app.post("/api/start-events", (req, res) => {
   if (eventScrapeState.isScraping) return res.status(409).json({ status: false, error: "Event scrape already in progress", timestamp: getTimeInfo() });
   eventScrapeState = { isScraping: true, startedAt: new Date().toISOString(), finishedAt: null, error: null };
   currentEventCards = null;
+  currentEventStats = null;
+  currentUnknownEvents = null;
+  currentMenuChecked = null;
+  currentMenuError = null;
   res.json({ status: true, message: "Event scrape started", timestamp: getTimeInfo(), scraper: { isScraping: true, startedAt: eventScrapeState.startedAt } });
   (async () => {
     try {
       activeEventScraper = new ShoobEventScraper();
       currentEventCards = await activeEventScraper.fetchAll();
+      currentEventStats = activeEventScraper.eventStats;
+      currentUnknownEvents = activeEventScraper.unknownEvents;
+      currentMenuChecked = activeEventScraper.menuChecked;
+      currentMenuError = activeEventScraper.menuError;
       console.log(`[done] ${currentEventCards.length} event cards collected`);
     } catch (err) {
       eventScrapeState.error = err.message;
@@ -135,14 +158,30 @@ app.get("/api/status-events", (req, res) => {
   const expected = activeEventScraper?.expectedTotal ?? (eventScrapeState.finishedAt && count > 0 ? count : null);
   const progress = expected && expected > 0 ? Math.min(100, (count / expected) * 100) : null;
   const phase = activeEventScraper?.phase || (eventScrapeState.finishedAt ? "done" : "idle");
-  res.json({ status: true, timestamp: getTimeInfo(), ...eventScrapeState, phase, cardCount: count, expectedTotal: expected, progress, ready: !eventScrapeState.isScraping && count > 0 });
+  const eventStats = activeEventScraper ? activeEventScraper.eventStats : currentEventStats;
+  const unknownEvents = activeEventScraper ? activeEventScraper.unknownEvents : currentUnknownEvents;
+  const menuChecked = activeEventScraper ? activeEventScraper.menuChecked : currentMenuChecked;
+  const menuError = activeEventScraper ? activeEventScraper.menuError : currentMenuError;
+  res.json({
+    status: true,
+    timestamp: getTimeInfo(),
+    ...eventScrapeState,
+    phase,
+    cardCount: count,
+    expectedTotal: expected,
+    progress,
+    eventStats,
+    unknownEvents: unknownEvents ?? [],
+    menuChecked: menuChecked ?? null,
+    menuError: menuError ?? null,
+    ready: !eventScrapeState.isScraping && count > 0,
+  });
 });
 
 app.get("/api/download-events", (req, res) => {
   const cards = activeEventScraper ? activeEventScraper.cards : currentEventCards;
   const isPartial = eventScrapeState.isScraping;
   if (!cards || cards.length === 0) return res.status(404).json({ status: false, error: "No event data yet", timestamp: getTimeInfo() });
-  // Grouped output: { "easter": [...], "halloween": [...] }
   const grouped = groupCardsByEvent(cards);
   const body = JSON.stringify(grouped, null, 2);
   const groupCount = Object.keys(grouped).length;

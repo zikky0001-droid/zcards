@@ -14,6 +14,7 @@ const { io } = require("socket.io-client");
 
 const SHOOB_URL = process.env.SHOOB_URL || "https://shoob.gg";
 const REQUEST_TIMEOUT = 30000;
+const PREFLIGHT_TIMEOUT = 10000;
 
 const SHOOB_ENCRYPTION_SECRET =
   "GaTSqvlqTrrWyTFTH2vcbRb7IJq9auX1hVjzN77pvBPp5fxH7OrIfos89P5zDHy82" +
@@ -22,8 +23,7 @@ const SHOOB_ENCRYPTION_SECRET =
   "nQQrx5S5rItE5HT76bqJeNpQ1Wgvw3dhWCjmkha939kqzIOnQA9b9DnnYj6aeLdV" +
   "VAviHzvq8iQZludOBwKknbOnJNOATdKQHmsbF8NmNcq";
 
-// Event slugs. Verify these against https://shoob.gg/card-events
-// Unknown slugs simply return 0 cards and are skipped.
+// Event slugs. "summer-gala" was wrong — use "summer" and "gala" separately.
 const KNOWN_EVENTS = [
   "easter",
   "chinese-new-year",
@@ -32,7 +32,8 @@ const KNOWN_EVENTS = [
   "christmas",
   "my-hero-academia-ccg",
   "maid-day",
-  "summer-gala",
+  "summer",
+  "gala",
   "sworn",
   "olympics",
 ];
@@ -138,12 +139,32 @@ function groupCardsByEvent(cards) {
     if (!grouped[ev]) grouped[ev] = [];
     grouped[ev].push(card);
   }
-  // Sort keys alphabetically for deterministic output
   const sorted = {};
   for (const key of Object.keys(grouped).sort()) {
     sorted[key] = grouped[key];
   }
   return sorted;
+}
+
+/**
+ * Preflight: fetch /card-events and extract every /card-events/<slug> link.
+ * Returns { ok, slugs } or { ok:false, reason } on failure.
+ * Purely informational — never throws, never affects the scrape.
+ */
+async function fetchMenuSlugs() {
+  try {
+    const res = await fetch(`${SHOOB_URL}/card-events`, {
+      headers: { "User-Agent": "Mozilla/5.0 (compatible; ShoobScraper/1.0)" },
+      signal: AbortSignal.timeout(PREFLIGHT_TIMEOUT),
+    });
+    if (!res.ok) return { ok: false, reason: `HTTP ${res.status}` };
+    const html = await res.text();
+    const matches = [...html.matchAll(/\/card-events\/([a-z0-9][a-z0-9-]*)(?=["'/?#]|$)/gi)];
+    const slugs = [...new Set(matches.map(m => m[1].toLowerCase()))];
+    return { ok: true, slugs };
+  } catch (e) {
+    return { ok: false, reason: e.message };
+  }
 }
 
 class ShoobEventScraper {
@@ -152,7 +173,11 @@ class ShoobEventScraper {
     this.cards = [];
     this.expectedTotal = null;
     this.responseEvent = "cardeventindexres";
-    this.phase = "idle"; // "discovery" | "scraping" | "done"
+    this.phase = "idle"; // "idle" | "preflight" | "discovery" | "scraping" | "done"
+    this.eventStats = {}; // { [slug]: { expected, collected } }
+    this.unknownEvents = []; // slugs on menu but not in KNOWN_EVENTS
+    this.menuChecked = false; // true if preflight succeeded
+    this.menuError = null;    // reason if preflight failed
   }
 
   _requestPage(socket, eventSlug, page) {
@@ -177,6 +202,27 @@ class ShoobEventScraper {
     });
   }
 
+  async _runPreflight() {
+    this.phase = "preflight";
+    console.log("[Preflight] Fetching menu from /card-events...");
+    const result = await fetchMenuSlugs();
+    if (!result.ok) {
+      this.menuChecked = false;
+      this.menuError = result.reason;
+      console.warn(`[Preflight] skipped (${result.reason}) — proceeding with KNOWN_EVENTS only`);
+      return;
+    }
+    this.menuChecked = true;
+    this.menuError = null;
+    this.unknownEvents = result.slugs.filter(s => !this.events.includes(s));
+    if (this.unknownEvents.length > 0) {
+      console.warn(`[Preflight] ${this.unknownEvents.length} unknown event(s) on menu: ${this.unknownEvents.join(", ")}`);
+      console.warn(`[Preflight] Add them to KNOWN_EVENTS in events.js to scrape them next run.`);
+    } else {
+      console.log(`[Preflight] Menu has ${result.slugs.length} event(s) — all covered by KNOWN_EVENTS.`);
+    }
+  }
+
   async fetchAll() {
     console.log(`[Event Scraper] Connecting to ${SHOOB_URL}...`);
 
@@ -195,7 +241,10 @@ class ShoobEventScraper {
       socket.on("connect", async () => {
         console.log("[Event Scraper] Connected.");
         try {
-          // ── DISCOVERY PASS: probe each event's total ──
+          // ── PREFLIGHT (warning-only) ──
+          await this._runPreflight();
+
+          // ── DISCOVERY PASS ──
           this.phase = "discovery";
           console.log("[Event Scraper] Discovery pass — probing totals for each event...");
           const eventTotals = {};
@@ -205,10 +254,12 @@ class ShoobEventScraper {
               const { docs, totalDocs } = extractPage(raw);
               const total = totalDocs ?? docs.length;
               eventTotals[eventSlug] = total;
+              this.eventStats[eventSlug] = { expected: total, collected: 0 };
               console.log(`[Discovery] ${eventSlug}: ${total} cards`);
             } catch (e) {
               console.warn(`[Discovery] ${eventSlug} failed: ${e.message}`);
               eventTotals[eventSlug] = 0;
+              this.eventStats[eventSlug] = { expected: 0, collected: 0 };
             }
           }
           this.expectedTotal = Object.values(eventTotals).reduce((a, b) => a + b, 0);
@@ -224,10 +275,9 @@ class ShoobEventScraper {
             }
 
             console.log(`[Event Scraper] Scraping ${eventSlug} (${eventTotal} cards)...`);
-            const cardsBefore = this.cards.length;
             let page = 1;
             let totalPages = null;
-            let eventTotalDocs = eventTotal;
+            let collectedThisEvent = 0;
 
             while (true) {
               const rawPage = await this._requestPage(socket, eventSlug, page);
@@ -241,19 +291,22 @@ class ShoobEventScraper {
                   const normalized = normalizeEventCard(card, eventSlug);
                   if (!this.cards.some((c) => c.id === normalized.id)) {
                     this.cards.push(normalized);
+                    collectedThisEvent++;
+                    if (this.eventStats[eventSlug]) {
+                      this.eventStats[eventSlug].collected = collectedThisEvent;
+                    }
                   }
                 } catch (exc) {
                   console.warn(`[Warning] Skipping invalid event card: ${exc.message}`);
                 }
               }
 
-              const collectedThisEvent = this.cards.length - cardsBefore;
               console.log(
-                `[Event Progress] ${eventSlug} page ${page}: ${collectedThisEvent}/${eventTotalDocs} (total: ${this.cards.length}/${this.expectedTotal})`
+                `[Event Progress] ${eventSlug} page ${page}: ${collectedThisEvent}/${eventTotal} (total: ${this.cards.length}/${this.expectedTotal})`
               );
 
               if (totalPages !== null && page >= totalPages) break;
-              if (collectedThisEvent >= eventTotalDocs) break;
+              if (collectedThisEvent >= eventTotal) break;
               page++;
             }
           }
@@ -316,6 +369,9 @@ async function main() {
     const summary = Object.entries(grouped).map(([k, v]) => `${k}: ${v.length}`).join(", ");
     console.log(`\n[Success] Saved ${cards.length} event cards to ${args.output}`);
     console.log(`[Groups] ${summary}`);
+    if (scraper.menuChecked && scraper.unknownEvents.length > 0) {
+      console.log(`[Preflight] Unknown events on menu: ${scraper.unknownEvents.join(", ")}`);
+    }
   } catch (error) {
     console.error(`[Error] ${error.message}`);
     process.exit(1);
@@ -329,6 +385,7 @@ module.exports = {
   normalizeEventCard,
   extractPage,
   groupCardsByEvent,
+  fetchMenuSlugs,
   writeCards,
   parseArgs,
   ShoobEventScraper,
@@ -338,4 +395,5 @@ module.exports = {
 };
 
 if (require.main === module) main();
+
 
