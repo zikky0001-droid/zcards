@@ -1,0 +1,111 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Shoob Card Scraper</title>
+  <style>
+    * { box-sizing: border-box; }
+    body {
+      font-family: system-ui, -apple-system, sans-serif;
+      max-width: 640px;
+      margin: 3rem auto;
+      padding: 1rem;
+      background: #0f172a;
+      color: #e2e8f0;
+    }
+    h1 { margin-bottom: 0.5rem; }
+    button {
+      padding: 0.8rem 1.6rem;
+      font-size: 1rem;
+      margin-right: 0.5rem;
+      cursor: pointer;
+      border-radius: 8px;
+      border: none;
+      font-weight: 600;
+    }
+    button:disabled { opacity: 0.4; cursor: not-allowed; }
+    #startBtn { background: #22c55e; color: white; }
+    #downloadBtn { background: #3b82f6; color: white; }
+    #status {
+      margin-top: 1.5rem;
+      padding: 1rem;
+      background: #1e293b;
+      border-radius: 8px;
+      font-family: ui-monospace, monospace;
+      line-height: 1.5;
+      min-height: 3rem;
+    }
+    .ok { color: #4ade80; }
+    .err { color: #f87171; }
+  </style>
+</head>
+<body>
+  <h1>Shoob Card Scraper</h1>
+  <p style="color:#94a3b8; margin-top:0">Tap start, wait, tap download.</p>
+
+  <button id="startBtn">Start Scraping</button>
+  <button id="downloadBtn" disabled>Download cards.json</button>
+
+  <div id="status">Idle</div>
+
+  <script>
+    const startBtn = document.getElementById("startBtn");
+    const downloadBtn = document.getElementById("downloadBtn");
+    const statusEl = document.getElementById("status");
+    let pollTimer = null;
+
+    async function refresh() {
+      try {
+        const res = await fetch("/api/status");
+        const s = await res.json();
+
+        if (s.isScraping) {
+          statusEl.innerHTML = `Scraping… <b>${s.cardCount.toLocaleString()}</b> cards collected`;
+          startBtn.disabled = true;
+          downloadBtn.disabled = true;
+        } else if (s.error) {
+          statusEl.innerHTML = `<span class="err">Error: ${s.error}</span>`;
+          startBtn.disabled = false;
+          downloadBtn.disabled = !s.cardCount;
+          if (pollTimer) clearInterval(pollTimer);
+        } else if (s.cardCount > 0) {
+          statusEl.innerHTML = `<span class="ok">Done! ${s.cardCount.toLocaleString()} cards ready.</span>`;
+          startBtn.disabled = false;
+          downloadBtn.disabled = false;
+          if (pollTimer) clearInterval(pollTimer);
+        } else {
+          statusEl.textContent = "Idle";
+          startBtn.disabled = false;
+          downloadBtn.disabled = true;
+        }
+      } catch (e) {
+        statusEl.innerHTML = `<span class="err">Network error: ${e.message}</span>`;
+      }
+    }
+
+    startBtn.onclick = async () => {
+      startBtn.disabled = true;
+      statusEl.textContent = "Starting…";
+      const res = await fetch("/api/start", { method: "POST" });
+      if (!res.ok) {
+        const d = await res.json();
+        statusEl.innerHTML = `<span class="err">${d.error}</span>`;
+        startBtn.disabled = false;
+        return;
+      }
+      if (pollTimer) clearInterval(pollTimer);
+      pollTimer = setInterval(refresh, 2000);
+      refresh();
+    };
+
+    downloadBtn.onclick = () => {
+      window.location.href = "/api/download";
+    };
+
+    refresh();
+  </script>
+</body>
+</html>
+
+
