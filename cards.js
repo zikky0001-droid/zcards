@@ -29,9 +29,6 @@ const SHOOB_ENCRYPTION_SECRET =
   "nQQrx5S5rItE5HT76bqJeNpQ1Wgvw3dhWCjmkha939kqzIOnQA9b9DnnYj6aeLdV" +
   "VAviHzvq8iQZludOBwKknbOnJNOATdKQHmsbF8NmNcq";
 
-/**
- * Return the first non-empty value from an object key list.
- */
 function first(obj, ...keys) {
   if (!obj || typeof obj !== "object") return null;
   for (const key of keys) {
@@ -51,9 +48,6 @@ function extractSeries(card) {
   return String(value);
 }
 
-/**
- * Decrypt one value using Shoob's browser client Cryptr-compatible format (AES-256-CTR).
- */
 function decryptShoobValue(hexValue) {
   const raw = Buffer.from(hexValue, "hex");
   const iv = raw.subarray(0, 16);
@@ -81,6 +75,9 @@ function normalizeCard(card) {
 
   const strId = String(cardId);
   return {
+    // Preserve EVERY raw field Shoob sends (creator, artist, rarity, stats, …)
+    ...card,
+    // Normalized fields added on top — consistent shape across all cards
     id: strId,
     name: String(name),
     tier: String(tier),
@@ -146,6 +143,7 @@ class ShoobCardScraper {
     this.category = category;
     this.cards = [];
     this.responseEvent = "cardindexres";
+    this.expectedTotal = null; // ← exposed to server so UI can show a progress bar
   }
 
   async fetchAll() {
@@ -192,7 +190,10 @@ class ShoobCardScraper {
 
             const { docs, totalPages: respPages, totalDocs: respTotal } = extractPage(rawPage);
             if (respPages !== null) totalPages = respPages;
-            if (respTotal !== null) totalDocs = respTotal;
+            if (respTotal !== null) {
+              totalDocs = respTotal;
+              this.expectedTotal = respTotal; // ← update exposed count
+            }
 
             if (docs.length === 0) break;
 

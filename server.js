@@ -1,5 +1,4 @@
-// server.js file
-
+// server.js 
 
 const express = require("express");
 const path = require("node:path");
@@ -8,14 +7,12 @@ const { ShoobCardScraper } = require("./cards.js");
 const app = express();
 const PORT = Number(process.env.PORT || 3000);
 
-// ── Pretty-print ALL JSON responses (same as your /ping reference) ──
 app.set("json spaces", 2);
 
 app.use(express.json({ limit: "1mb" }));
 app.use(express.urlencoded({ extended: true, limit: "1mb" }));
 app.use(express.static(path.join(__dirname, "public")));
 
-// ── Scrape state (module-level, shared by all endpoints) ──
 let currentCards = null;
 let activeScraper = null;
 let scrapeState = {
@@ -25,7 +22,6 @@ let scrapeState = {
   error: null,
 };
 
-// ── Endpoints advertised in /api/health and 404 responses ──
 const AVAILABLE_ENDPOINTS = [
   "/",
   "/api/start",
@@ -35,15 +31,11 @@ const AVAILABLE_ENDPOINTS = [
   "/ping",
 ];
 
-// ── Helpers ────────────────────────────────────────────────────────
 function getTimeInfo() {
   const now = new Date();
-
-  // UTC
   const utcDate = now.toISOString().split("T")[0];
   const utcTime = now.toISOString().split("T")[1].replace("Z", " UTC");
 
-  // Africa/Lagos (WAT = UTC+1, no DST)
   const lagosDate = now.toLocaleDateString("en-NG", {
     timeZone: "Africa/Lagos",
     year: "numeric",
@@ -71,11 +63,7 @@ function getTimeInfo() {
   return {
     unix: Math.floor(now.getTime() / 1000),
     iso: now.toISOString(),
-    utc: {
-      date: utcDate,
-      time: utcTime,
-      full: now.toUTCString(),
-    },
+    utc: { date: utcDate, time: utcTime, full: now.toUTCString() },
     lagos: {
       timezone: "Africa/Lagos (WAT, UTC+1)",
       date: lagosDate,
@@ -99,14 +87,20 @@ function currentCardCount() {
   return 0;
 }
 
-// ── Rich health / ping ────────────────────────────────────────────
+function getCardsSnapshot() {
+  if (activeScraper) return activeScraper.cards;
+  return currentCards;
+}
+
+// ── Health / ping ─────────────────────────────────────────────────
 app.get(["/api/health", "/ping"], (req, res) => {
   const uptimeSec = process.uptime();
   const mem = process.memoryUsage();
+  const count = currentCardCount();
 
   res.json({
     status: true,
-    service: "ZCard Scraper",
+    service: "Shoob Card Scraper",
     message: "PONG — server is alive 🟢",
     timestamp: getTimeInfo(),
     server: {
@@ -124,21 +118,23 @@ app.get(["/api/health", "/ping"], (req, res) => {
       startedAt: scrapeState.startedAt,
       finishedAt: scrapeState.finishedAt,
       error: scrapeState.error,
-      cardCount: currentCardCount(),
-      ready: !scrapeState.isScraping && currentCardCount() > 0,
+      cardCount: count,
+      downloadable: count > 0,
+      downloadStatus:
+        count === 0 ? "empty" : scrapeState.isScraping ? "partial" : "complete",
     },
     available_endpoints: AVAILABLE_ENDPOINTS,
     quick_test: {
       start: "POST /api/start",
       status: "GET /api/status",
-      download: "GET /api/download",
+      download: "GET /api/download (works during scrape — returns partial JSON)",
       health: "GET /api/health",
       ping: "GET /ping",
     },
   });
 });
 
-// ── Scrape control ─────────────────────────────────────────────────
+// ── Start scrape ──────────────────────────────────────────────────
 app.post("/api/start", (req, res) => {
   if (scrapeState.isScraping) {
     return res.status(409).json({
@@ -168,7 +164,6 @@ app.post("/api/start", (req, res) => {
     scraper: { isScraping: true, startedAt: scrapeState.startedAt },
   });
 
-  // Run in background — do not block the HTTP response
   (async () => {
     try {
       activeScraper = new ShoobCardScraper({ category: null });
@@ -185,31 +180,53 @@ app.post("/api/start", (req, res) => {
   })();
 });
 
+// ── Status ────────────────────────────────────────────────────────
 app.get("/api/status", (req, res) => {
   const count = currentCardCount();
+  const expected =
+    activeScraper?.expectedTotal ??
+    (scrapeState.finishedAt && count > 0 ? count : null);
+  const progress =
+    expected && expected > 0 ? Math.min(1, count / expected) : null;
+
   res.json({
     status: true,
     timestamp: getTimeInfo(),
     ...scrapeState,
     cardCount: count,
+    expectedTotal: expected,
+    progress,
     ready: !scrapeState.isScraping && count > 0,
   });
 });
 
+// ── Download (works DURING a scrape — returns partial snapshot) ──
 app.get("/api/download", (req, res) => {
-  if (!currentCards || currentCards.length === 0) {
+  const cards = getCardsSnapshot();
+  const isPartial = scrapeState.isScraping;
+
+  if (!cards || cards.length === 0) {
     return res.status(404).json({
       status: false,
       error: "No data yet. Run a scrape first.",
       timestamp: getTimeInfo(),
     });
   }
+
+  // Snapshot the array NOW — safe because Node is single-threaded and
+  // JSON.stringify is synchronous (no yields to the scrape loop mid-stringify).
+  const body = JSON.stringify(cards, null, 2);
+  const filename = isPartial ? "cards-partial.json" : "cards.json";
+
   res.setHeader("Content-Type", "application/json");
-  res.setHeader("Content-Disposition", 'attachment; filename="cards.json"');
-  res.send(JSON.stringify(currentCards, null, 2));
+  res.setHeader("Content-Disposition", `attachment; filename="${filename}"`);
+  res.setHeader("X-Scrape-Status", isPartial ? "in-progress" : "complete");
+  res.setHeader("X-Card-Count", String(cards.length));
+  res.setHeader("X-Timestamp", new Date().toISOString());
+  res.send(body);
 });
 
-// ── 404 handler (pretty-printed JSON) ─────────────────────────────
+// ── 404 ──────────────────────────────────────────────────────────
 app.use((req, res) => {
   const wantsHtml =
     req.accepts("html") &&
@@ -233,7 +250,7 @@ app.use((req, res) => {
   });
 });
 
-// ── Boot ───────────────────────────────────────────────────────────
+// ── Boot ─────────────────────────────────────────────────────────
 const server = app.listen(PORT, () => {
   console.log(
     `\n╔══════════════════════════════════════════════╗\n` +
@@ -246,16 +263,15 @@ const server = app.listen(PORT, () => {
   );
 });
 
-// ── 13-min self-ping (5s initial delay, like your /ping reference) ──
+// ──  self-ping ─────────────────────────────────────────────
 const SELF_URL = process.env.RENDER_EXTERNAL_URL?.replace(/\/$/, "");
 if (SELF_URL) {
   const PING_MS = 14.2 * 60 * 1000;
   const ping = async () => {
     const t0 = Date.now();
     try {
-      const res = await fetch(`${SELF_URL}/api/health`);
-      const ms = Date.now() - t0;
-      console.log(`[keep-alive] ${res.status} ${ms}ms → ${SELF_URL}/api/health`);
+      const r = await fetch(`${SELF_URL}/api/health`);
+      console.log(`[keep-alive] ${r.status} ${Date.now() - t0}ms → ${SELF_URL}/api/health`);
     } catch (e) {
       console.warn(`[keep-alive] failed: ${e.message}`);
     }
@@ -265,7 +281,7 @@ if (SELF_URL) {
   console.log(`[keep-alive] self-ping every 13 min → ${SELF_URL}/api/health`);
 }
 
-// ── Graceful shutdown ──────────────────────────────────────────────
+// ── Graceful shutdown ────────────────────────────────────────────
 const shutdown = (signal) => {
   console.log(`\n🛑 ${signal} received. Closing HTTP server...`);
   server.close(() => process.exit(0));
