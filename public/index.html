@@ -14,7 +14,6 @@
     h1 { font-size: 1.9rem; font-weight: 700; letter-spacing: -0.02em; margin-bottom: 0.4rem; background: linear-gradient(135deg, #ffffff 0%, #8a94b0 100%); -webkit-background-clip: text; -webkit-text-fill-color: transparent; background-clip: text; }
     .subtitle { color: var(--muted); font-size: 0.92rem; line-height: 1.5; margin-bottom: 1.75rem; }
 
-    /* ── Sections ── */
     .section { margin-bottom: 2rem; }
     .section-title { font-size: 1.05rem; font-weight: 700; margin-bottom: 0.85rem; display: flex; align-items: center; gap: 0.5rem; }
     .section-title .emoji { font-size: 1.2rem; }
@@ -64,6 +63,30 @@
     .progress-bar { height: 100%; width: 0%; background: linear-gradient(90deg, var(--green) 0%, var(--blue) 100%); border-radius: 999px; transition: width 0.5s ease; }
     .progress-bar-event { background: linear-gradient(90deg, var(--purple) 0%, var(--amber) 100%); }
 
+    /* ── Per-event breakdown ── */
+    .breakdown { margin-top: 1.15rem; background: rgba(255,255,255,0.02); border: 1px solid var(--border); border-radius: 12px; padding: 0.9rem 1rem; font-size: 0.86rem; }
+    .breakdown-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.65rem; }
+    .breakdown-title { font-weight: 700; font-size: 0.78rem; text-transform: uppercase; letter-spacing: 0.08em; color: var(--muted); }
+    .copy-btn { padding: 0.4rem 0.8rem; font-size: 0.72rem; font-weight: 700; border: 1px solid var(--border); background: transparent; color: var(--text); border-radius: 7px; cursor: pointer; transition: background 0.15s ease, border-color 0.15s ease; }
+    .copy-btn:hover { background: rgba(255,255,255,0.05); border-color: var(--muted); }
+    .copy-btn.copied { background: rgba(34, 197, 94, 0.15); border-color: var(--green); color: var(--green); }
+    .event-row { display: flex; justify-content: space-between; padding: 0.35rem 0; border-bottom: 1px solid rgba(255,255,255,0.03); }
+    .event-row:last-child { border-bottom: none; }
+    .event-row.total { border-top: 1px solid var(--border); margin-top: 0.35rem; padding-top: 0.55rem; font-weight: 700; }
+    .event-name { color: var(--text); text-transform: capitalize; }
+    .event-counts { font-family: ui-monospace, "SF Mono", Menlo, monospace; color: var(--muted); }
+    .event-counts .got { color: var(--amber); font-weight: 700; }
+    .event-counts .avail { color: var(--muted); }
+
+    /* ── Menu preflight info line ── */
+    .menu-check { margin-top: 0.75rem; padding: 0.6rem 0.85rem; border-radius: 9px; font-size: 0.78rem; line-height: 1.45; display: flex; align-items: flex-start; gap: 0.55rem; }
+    .menu-check.ok { background: rgba(34, 197, 94, 0.08); color: var(--green); border: 1px solid rgba(34, 197, 94, 0.18); }
+    .menu-check.warn { background: rgba(251, 191, 36, 0.08); color: var(--amber); border: 1px solid rgba(251, 191, 36, 0.22); }
+    .menu-check.skip { background: rgba(255,255,255,0.02); color: var(--muted); border: 1px solid var(--border); }
+    .menu-check .icon { flex-shrink: 0; }
+    .menu-check .text { flex: 1; }
+    .menu-check .slug { font-family: ui-monospace, "SF Mono", Menlo, monospace; color: var(--text); font-weight: 600; }
+
     .footnote { text-align: center; color: var(--muted); font-size: 0.78rem; line-height: 1.5; margin-top: 1.5rem; }
     .footnote b { color: var(--text); font-weight: 600; }
     @media (max-width: 420px) { .actions { grid-template-columns: 1fr; } h1 { font-size: 1.6rem; } }
@@ -112,6 +135,21 @@
           <div class="status-text" id="eventStatus">Waiting to start…</div>
           <div class="progress-wrap" id="eventProgressWrap" style="display:none"><div class="progress-bar progress-bar-event" id="eventProgressBar"></div></div>
         </div>
+
+        <!-- Menu preflight line (unknown events) -->
+        <div class="menu-check" id="menuCheck" style="display:none">
+          <span class="icon" id="menuCheckIcon"></span>
+          <span class="text" id="menuCheckText"></span>
+        </div>
+
+        <!-- Per-event breakdown -->
+        <div class="breakdown" id="eventBreakdown" style="display:none">
+          <div class="breakdown-header">
+            <span class="breakdown-title">Per-Event Breakdown</span>
+            <button class="copy-btn" id="copyBreakdownBtn">Copy Summary</button>
+          </div>
+          <div id="eventRows"></div>
+        </div>
       </div>
     </div>
 
@@ -129,6 +167,7 @@
       wrap.style.display = "block";
       bar.style.width = Math.max(0, Math.min(100, pct)) + "%";
     }
+    function escapeHtml(s) { return String(s).replace(/[&<>"']/g, c => ({ "&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#39;" }[c])); }
 
     // ══════════ MAIN SCRAPER UI ══════════
     const startBtn = document.getElementById("startBtn");
@@ -146,7 +185,7 @@
         const s = await res.json();
         if (s.isScraping) {
           setDot(dot, "running"); statusLabel.textContent = "Scraping";
-          const pct = s.progress != null ? s.progress : null; // server sends 0–100 already
+          const pct = s.progress != null ? s.progress : null;
           const pctLabel = pct != null ? `<span class="pct">${pct.toFixed(1)}%</span>` : "";
           statusEl.innerHTML = `Collected <span class="count">${s.cardCount.toLocaleString()}</span>${s.expectedTotal ? ` of <span class="count">${s.expectedTotal.toLocaleString()}</span>` : ""} cards ${pctLabel}<span class="partial-badge">partial download ready</span>`;
           showProgress(progressWrap, progressBar, pct);
@@ -194,20 +233,79 @@
     const eventDot = document.getElementById("eventDot");
     const eventProgressWrap = document.getElementById("eventProgressWrap");
     const eventProgressBar = document.getElementById("eventProgressBar");
+    const eventBreakdown = document.getElementById("eventBreakdown");
+    const eventRows = document.getElementById("eventRows");
+    const copyBreakdownBtn = document.getElementById("copyBreakdownBtn");
+    const menuCheck = document.getElementById("menuCheck");
+    const menuCheckIcon = document.getElementById("menuCheckIcon");
+    const menuCheckText = document.getElementById("menuCheckText");
     let eventPollTimer = null;
+
+    function renderMenuCheck(menuChecked, unknownEvents, menuError) {
+      // Only render if preflight has run at least once
+      if (menuChecked === null || menuChecked === undefined) {
+        menuCheck.style.display = "none";
+        return;
+      }
+      menuCheck.style.display = "flex";
+      const list = Array.isArray(unknownEvents) ? unknownEvents : [];
+      menuCheck.className = "menu-check";
+      if (menuChecked === false) {
+        menuCheck.classList.add("skip");
+        menuCheckIcon.textContent = "⏭";
+        menuCheckText.innerHTML = `Menu check skipped${menuError ? ` (${escapeHtml(menuError)})` : ""} — using hardcoded list.`;
+      } else if (list.length === 0) {
+        menuCheck.classList.add("ok");
+        menuCheckIcon.textContent = "✓";
+        menuCheckText.innerHTML = `Menu check passed — no unknown events.`;
+      } else {
+        menuCheck.classList.add("warn");
+        menuCheckIcon.textContent = "⚠";
+        const names = list.map(s => `<span class="slug">${escapeHtml(s)}</span>`).join(", ");
+        menuCheckText.innerHTML = `${list.length} unknown event${list.length === 1 ? "" : "s"} on menu: ${names}`;
+      }
+    }
+
+    function renderBreakdown(stats) {
+      if (!stats || Object.keys(stats).length === 0) {
+        eventBreakdown.style.display = "none";
+        return;
+      }
+      eventBreakdown.style.display = "block";
+      let totalGot = 0, totalAvail = 0;
+      const rows = Object.entries(stats).map(([slug, { expected, collected }]) => {
+        totalGot += collected;
+        totalAvail += expected;
+        return `<div class="event-row">
+          <span class="event-name">${escapeHtml(slug)}</span>
+          <span class="event-counts"><span class="got">${collected.toLocaleString()}</span> / <span class="avail">${expected.toLocaleString()}</span></span>
+        </div>`;
+      }).join("");
+      const totalRow = `<div class="event-row total">
+        <span class="event-name">Total</span>
+        <span class="event-counts"><span class="got">${totalGot.toLocaleString()}</span> / <span class="avail">${totalAvail.toLocaleString()}</span></span>
+      </div>`;
+      eventRows.innerHTML = rows + totalRow;
+    }
 
     async function refreshEvents() {
       try {
         const res = await fetch("/api/status-events");
         const s = await res.json();
+        renderBreakdown(s.eventStats || null);
+        renderMenuCheck(s.menuChecked, s.unknownEvents, s.menuError);
+
         if (s.isScraping) {
+          const isPreflight = s.phase === "preflight";
           const isDiscovery = s.phase === "discovery";
           setDot(eventDot, "event-running");
-          eventStatusLabel.textContent = isDiscovery ? "Probing Events" : "Scraping Events";
+          eventStatusLabel.textContent = isPreflight ? "Checking Menu" : isDiscovery ? "Probing Events" : "Scraping Events";
           const pct = s.progress != null ? s.progress : null;
           const pctLabel = pct != null ? `<span class="pct">${pct.toFixed(1)}%</span>` : "";
-          const phaseBadge = isDiscovery ? `<span class="phase-badge">discovery</span>` : "";
-          eventStatusEl.innerHTML = isDiscovery
+          const phaseBadge = isPreflight ? `<span class="phase-badge">preflight</span>` : isDiscovery ? `<span class="phase-badge">discovery</span>` : "";
+          eventStatusEl.innerHTML = isPreflight
+            ? `Checking menu for unknown events… ${phaseBadge}`
+            : isDiscovery
             ? `Discovering event totals… ${phaseBadge}`
             : `Collected <span class="count count-event">${s.cardCount.toLocaleString()}</span>${s.expectedTotal ? ` of <span class="count count-event">${s.expectedTotal.toLocaleString()}</span>` : ""} event cards ${pctLabel}<span class="partial-badge">partial download ready</span>`;
           showProgress(eventProgressWrap, eventProgressBar, pct);
@@ -245,6 +343,29 @@
       refreshEvents();
     };
     downloadEventsBtn.onclick = () => { window.location.href = "/api/download-events"; };
+
+    copyBreakdownBtn.onclick = async () => {
+      const rows = eventRows.querySelectorAll(".event-row");
+      let text = "Shoob Event Scrape Summary\n=========================\n";
+      rows.forEach(row => {
+        const name = row.querySelector(".event-name").textContent;
+        const got = row.querySelector(".got").textContent;
+        const avail = row.querySelector(".avail").textContent;
+        text += `${name}: ${got} / ${avail}\n`;
+      });
+      try {
+        await navigator.clipboard.writeText(text);
+        copyBreakdownBtn.textContent = "Copied!";
+        copyBreakdownBtn.classList.add("copied");
+        setTimeout(() => {
+          copyBreakdownBtn.textContent = "Copy Summary";
+          copyBreakdownBtn.classList.remove("copied");
+        }, 2000);
+      } catch (e) {
+        alert("Copy failed: " + e.message);
+      }
+    };
+
     refreshEvents();
   </script>
 </body>
