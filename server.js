@@ -266,7 +266,7 @@ const server = app.listen(PORT, () => {
 // ──  self-ping ─────────────────────────────────────────────
 const SELF_URL = process.env.RENDER_EXTERNAL_URL?.replace(/\/$/, "");
 if (SELF_URL) {
-  const PING_MS = 14.2 * 60 * 1000;
+  const PING_MS = 24.2 * 60 * 1000;
   const ping = async () => {
     const t0 = Date.now();
     try {
