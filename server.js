@@ -27,8 +27,8 @@ if (process.env.SUPABASE_URL && process.env.SUPABASE_SERVICE_ROLE_KEY) {
 const state = {
   startedAt: new Date().toISOString(), lastMonitorAt: null, lastMonitorOk: null, supabaseReachable: false, supabaseConfigured, supabaseError: null,
   nextSourceCheckAt: null, lastSourceCheckAt: null,
-  cards: { isScraping: false, startedAt: null, finishedAt: null, count: 0, expected: null, error: null, lastSyncAt: null, storage: 'unknown' },
-  events: { isScraping: false, startedAt: null, finishedAt: null, count: 0, expected: null, error: null, lastSyncAt: null, storage: 'unknown', menuChecked: null, unknownEvents: [] },
+  cards: { isScraping: false, startedAt: null, finishedAt: null, count: 0, expected: null, sourceTotal: null, countsMatch: null, lastDelta: 0, error: null, lastSyncAt: null, storage: 'unknown' },
+  events: { isScraping: false, startedAt: null, finishedAt: null, count: 0, expected: null, sourceTotal: null, countsMatch: null, lastDelta: 0, error: null, lastSyncAt: null, storage: 'unknown', menuChecked: null, menuError: null, unknownEvents: [] },
 };
 let memoryCards = null, memoryEventCards = null;
 let syncPromise = null;
@@ -90,78 +90,179 @@ async function recordLog(entry) {
 }
 logger.setLogPersistence(recordLog);
 
-async function syncMain(cards, trigger) {
+async function countRows(table, filters = []) {
+  let q = supabase.from(table).select('id', { count: 'exact', head: true });
+  for (const [column, value] of filters) q = q.eq(column, value);
+  const { count, error } = await q;
+  if (error) throw error;
+  return count || 0;
+}
+async function readAllRows(table, columns = '*') {
+  const all = [], pageSize = 1000;
+  for (let start = 0; ; start += pageSize) {
+    const { data, error } = await supabase.from(table).select(columns).range(start, start + pageSize - 1);
+    if (error) throw error;
+    const rows = data || [];
+    all.push(...rows);
+    if (rows.length < pageSize) break;
+  }
+  return all;
+}
+async function recordNoopRun(catalog, trigger, sourceTotal, dbCount, metadata = {}) {
+  const { error } = await supabase.from('sync_runs').insert({
+    catalog, trigger, status: 'success', started_at: new Date().toISOString(), finished_at: new Date().toISOString(),
+    records_found: sourceTotal, records_added: 0,
+    metadata: { mode: 'count-match-noop', databaseCount: dbCount, sourceCount: sourceTotal, ...metadata }
+  });
+  if (error) throw error;
+}
+async function rebuildMainStorage() {
+  const rows = await readAllRows('cards');
+  await saveStorage('cards.json', rows.map(r => ({ id: String(r.id), name: r.name, tier: r.tier, series: r.series || '', image_url: r.image_url, author: r.author, author_link: r.author_link })));
+  state.cards.storage = 'available';
+}
+async function rebuildEventStorage() {
+  const rows = await readAllRows('event_cards');
+  const grouped = {};
+  for (const row of rows) {
+    const slug = String(row.event_slug || 'unknown');
+    if (!grouped[slug]) grouped[slug] = [];
+    grouped[slug].push({ id: String(row.id), name: row.name, tier: row.tier, series: row.series || '', event: slug, image_url: row.image_url, author: row.author, author_link: row.author_link });
+  }
+  await saveStorage('events.json', grouped);
+  state.events.storage = 'available';
+}
+
+async function syncMain(cards, trigger, sourceTotal = null) {
   if (!supabase) throw new Error('Supabase is not configured');
-  if (!Array.isArray(cards) || cards.length === 0) throw new Error('Refusing to publish an empty main catalog');
+  if (!Array.isArray(cards) || cards.length === 0) throw new Error('No missing main cards were discovered; refusing an empty write');
   const unique = new Map(cards.map(c => [String(c.id), c]));
-  if (unique.size !== cards.length) logger.log('WARN', 'sync', 'Duplicate IDs were found in main scrape; deduplicated before sync', { input: cards.length, unique: unique.size });
+  if (unique.size !== cards.length) logger.log('WARN', 'sync', 'Duplicate IDs found in missing-card scan; deduplicated', { input: cards.length, unique: unique.size });
   const clean = [...unique.values()];
-  const run = await supabase.from('sync_runs').insert({ catalog: 'cards', trigger, status: 'running', records_found: clean.length }).select('id').single();
+  const run = await supabase.from('sync_runs').insert({ catalog: 'cards', trigger, status: 'running', records_found: sourceTotal ?? clean.length, records_added: clean.length, metadata: { mode: 'incremental', missingFound: clean.length } }).select('id').single();
   if (run.error) throw run.error;
   try {
     await upsertBatches('cards', rowsForCards(clean));
-    await saveStorage('cards.json', clean);
-    await saveCatalogState('cards', clean.length, 'ready', null, { trigger });
-    await supabase.from('sync_runs').update({ status: 'success', finished_at: new Date().toISOString(), records_found: clean.length }).eq('id', run.data.id);
-    memoryCards = clean; state.cards.count = clean.length; state.cards.lastSyncAt = new Date().toISOString(); state.cards.storage = 'available'; state.cards.error = null;
-    logger.log('SUCCESS', 'sync', 'Main catalog synchronized', { count: clean.length, trigger });
+    const dbCount = await countRows('cards');
+    await rebuildMainStorage();
+    await saveCatalogState('cards', dbCount, 'ready', null, { trigger, sourceTotal, mode: 'incremental', recordsAdded: clean.length });
+    const { error: runError } = await supabase.from('sync_runs').update({ status: 'success', finished_at: new Date().toISOString(), records_found: sourceTotal ?? dbCount, records_added: clean.length, metadata: { mode: 'incremental', databaseCount: dbCount, sourceCount: sourceTotal, missingAdded: clean.length } }).eq('id', run.data.id);
+    if (runError) throw runError;
+    state.cards.count = dbCount; state.cards.lastSyncAt = new Date().toISOString(); state.cards.storage = 'available'; state.cards.error = null; state.cards.lastDelta = clean.length; state.cards.sourceTotal = sourceTotal; state.cards.countsMatch = sourceTotal == null ? null : dbCount === sourceTotal;
+    logger.log('SUCCESS', 'sync', 'Incremental main catalog repair completed', { databaseCount: dbCount, sourceTotal, added: clean.length, trigger });
   } catch (e) {
     await supabase.from('sync_runs').update({ status: 'failed', finished_at: new Date().toISOString(), error: String(e.message || e) }).eq('id', run.data.id);
     throw e;
   }
 }
-async function syncEvents(cards, trigger, scraper = null) {
+async function syncEvents(cards, trigger, scraper = null, sourceTotal = null) {
   if (!supabase) throw new Error('Supabase is not configured');
-  if (!Array.isArray(cards) || cards.length === 0) throw new Error('Refusing to publish an empty event catalog');
+  if (!Array.isArray(cards) || cards.length === 0) throw new Error('No missing event cards were discovered; refusing an empty write');
   if (scraper && scraper.menuChecked === false) throw new Error(`Event menu preflight failed: ${scraper.menuError || 'unknown error'}`);
-  const unique = new Map(cards.map(c => [String(c.id), c]));
-  if (unique.size !== cards.length) logger.log('WARN', 'sync', 'Duplicate IDs were found in event scrape; deduplicated before sync', { input: cards.length, unique: unique.size });
+  const unique = new Map(cards.map(c => [`${String(c.event || c.event_slug)}:${String(c.id)}`, c]));
   const clean = [...unique.values()];
   const grouped = groupCardsByEvent(clean);
-  const run = await supabase.from('sync_runs').insert({ catalog: 'events', trigger, status: 'running', records_found: clean.length, metadata: { eventCount: Object.keys(grouped).length } }).select('id').single();
+  const run = await supabase.from('sync_runs').insert({ catalog: 'events', trigger, status: 'running', records_found: sourceTotal ?? clean.length, records_added: clean.length, metadata: { mode: 'incremental', eventCount: Object.keys(grouped).length } }).select('id').single();
   if (run.error) throw run.error;
   try {
-    await upsertBatches('event_cards', rowsForEvents(clean));
-    await saveStorage('events.json', grouped);
-    await saveCatalogState('events', clean.length, 'ready', null, { trigger, eventCount: Object.keys(grouped).length, unknownEvents: scraper?.unknownEvents || [] });
-    await supabase.from('sync_runs').update({ status: 'success', finished_at: new Date().toISOString(), records_found: clean.length }).eq('id', run.data.id);
-    memoryEventCards = clean; state.events.count = clean.length; state.events.lastSyncAt = new Date().toISOString(); state.events.storage = 'available'; state.events.error = null;
+    const eventRows = rowsForEvents(clean);
+    const { error: upsertError } = await supabase.from('event_cards').upsert(eventRows, { onConflict: 'id,event_slug' });
+    if (upsertError) throw upsertError;
+    const dbRows = await readAllRows('event_cards', 'id,event_slug');
+    const dbCount = dbRows.length;
+    await rebuildEventStorage();
+    await saveCatalogState('events', dbCount, 'ready', null, { trigger, sourceTotal, mode: 'incremental', eventCount: new Set(dbRows.map(r => r.event_slug)).size, recordsAdded: clean.length, unknownEvents: scraper?.unknownEvents || [] });
+    const { error: runError } = await supabase.from('sync_runs').update({ status: 'success', finished_at: new Date().toISOString(), records_found: sourceTotal ?? dbCount, records_added: clean.length, metadata: { mode: 'incremental', databaseCount: dbCount, sourceCount: sourceTotal, missingAdded: clean.length, eventCount: Object.keys(grouped).length } }).eq('id', run.data.id);
+    if (runError) throw runError;
+    state.events.count = dbCount; state.events.lastSyncAt = new Date().toISOString(); state.events.storage = 'available'; state.events.error = null; state.events.lastDelta = clean.length; state.events.sourceTotal = sourceTotal;
+    const actualByEvent = new Map(); for (const row of dbRows) actualByEvent.set(String(row.event_slug), (actualByEvent.get(String(row.event_slug)) || 0) + 1);
+    state.events.countsMatch = scraper?.eventStats ? Object.entries(scraper.eventStats).every(([slug, stats]) => (actualByEvent.get(slug) || 0) === stats.expected) && [...actualByEvent.keys()].every(slug => Object.prototype.hasOwnProperty.call(scraper.eventStats, slug)) : null;
     state.events.menuChecked = scraper?.menuChecked ?? state.events.menuChecked; state.events.unknownEvents = scraper?.unknownEvents || [];
-    logger.log('SUCCESS', 'sync', 'Event catalog synchronized', { count: clean.length, eventCount: Object.keys(grouped).length, trigger });
+    logger.log('SUCCESS', 'sync', 'Incremental event catalog repair completed', { databaseCount: dbCount, sourceTotal, added: clean.length, trigger });
   } catch (e) {
     await supabase.from('sync_runs').update({ status: 'failed', finished_at: new Date().toISOString(), error: String(e.message || e) }).eq('id', run.data.id);
     throw e;
   }
 }
 async function scrapeMainAndSync(trigger) {
-  if (state.cards.isScraping) return;
-  state.cards.isScraping = true; state.cards.startedAt = new Date().toISOString(); state.cards.error = null;
-  logger.log('INFO', 'scraper-main', 'Main catalog scrape started', { trigger });
+  if (state.cards.isScraping) return { skipped: true, reason: 'main sync already running' };
+  state.cards.isScraping = true; state.cards.startedAt = new Date().toISOString(); state.cards.error = null; state.cards.lastDelta = 0; state.lastSourceCheckAt = new Date().toISOString();
+  logger.log('INFO', 'scraper-main', 'Checking Shoob published total before any card scan', { trigger });
   try {
-    const scraper = new ShoobCardScraper({ category: null });
-    const cards = await scraper.fetchAll();
-    state.cards.expected = scraper.expectedTotal || cards.length;
-    await syncMain(cards, trigger);
+    const dbCount = await countRows('cards');
+    const summaryScraper = new ShoobCardScraper({ category: null });
+    const summary = await summaryScraper.fetchSummary();
+    state.cards.expected = summary.total; state.cards.sourceTotal = summary.total;
+    if (summary.total === dbCount) {
+      if (state.cards.storage !== 'available') await rebuildMainStorage();
+      await recordNoopRun('cards', trigger, summary.total, dbCount);
+      await supabase.from('catalog_state').update({ last_checked_at: new Date().toISOString(), status: 'ready', last_error: null, metadata: { trigger, mode: 'count-match-noop', sourceTotal: summary.total } }).eq('catalog', 'cards');
+      state.cards.count = dbCount; state.cards.error = null; state.cards.countsMatch = true;
+      logger.log('SUCCESS', 'scraper-main', 'Counts match; skipped card scan and database writes', { sourceTotal: summary.total, databaseCount: dbCount, trigger });
+    } else {
+      logger.log('WARN', 'scraper-main', 'Published total differs; scanning IDs only for missing cards', { sourceTotal: summary.total, databaseCount: dbCount, trigger });
+      const existingRows = await readAllRows('cards', 'id');
+      const existingIds = new Set(existingRows.map(r => String(r.id)));
+      const scraper = new ShoobCardScraper({ category: null, existingIds });
+      const missing = await scraper.fetchAll();
+      state.cards.expected = summary.total;
+      if (!missing.length) {
+        const note = `Shoob total ${summary.total} differs from Supabase ${dbCount}, but no missing IDs were found. No records were deleted.`;
+        logger.log('WARN', 'scraper-main', note, { sourceTotal: summary.total, databaseCount: dbCount, trigger });
+        await recordNoopRun('cards', trigger, summary.total, dbCount, { mode: 'count-mismatch-no-missing-ids', warning: note });
+        await supabase.from('catalog_state').update({ last_checked_at: new Date().toISOString(), status: 'ready', last_error: note, metadata: { trigger, sourceTotal: summary.total, databaseCount: dbCount, warning: note } }).eq('catalog', 'cards');
+        state.cards.count = dbCount; state.cards.countsMatch = false;
+      } else {
+        if (dbCount > 0 && missing.length > Math.max(5000, summary.total * 0.35)) throw new Error(`Safety stop: ${missing.length} missing cards is an unexpectedly large delta for source total ${summary.total}`);
+        await syncMain(missing, trigger, summary.total);
+      }
+    }
     state.cards.finishedAt = new Date().toISOString();
-  } catch (e) { state.cards.error = e.message || String(e); logger.log('ERROR', 'scraper-main', 'Main scrape/sync failed; retaining last known-good catalog', { error: state.cards.error }); }
+  } catch (e) { state.cards.error = e.message || String(e); logger.log('ERROR', 'scraper-main', 'Main incremental check failed; retaining last known-good catalog', { error: state.cards.error }); }
   finally { state.cards.isScraping = false; }
 }
 async function scrapeEventsAndSync(trigger) {
-  if (state.events.isScraping) return;
-  state.events.isScraping = true; state.events.startedAt = new Date().toISOString(); state.events.error = null;
-  logger.log('INFO', 'scraper-events', 'Event catalog scrape started', { trigger });
+  if (state.events.isScraping) return { skipped: true, reason: 'event sync already running' };
+  state.events.isScraping = true; state.events.startedAt = new Date().toISOString(); state.events.error = null; state.events.lastDelta = 0; state.lastSourceCheckAt = new Date().toISOString();
+  logger.log('INFO', 'scraper-events', 'Checking Shoob event menu and per-event totals before scanning cards', { trigger });
   try {
-    const scraper = new ShoobEventScraper();
-    const cards = await scraper.fetchAll();
-    state.events.expected = scraper.expectedTotal || cards.length;
-    state.events.menuChecked = scraper.menuChecked; state.events.unknownEvents = scraper.unknownEvents || [];
-    await syncEvents(cards, trigger, scraper);
+    const summaryScraper = new ShoobEventScraper();
+    const summary = await summaryScraper.fetchSummary();
+    state.events.expected = summary.total; state.events.sourceTotal = summary.total;
+    const dbRows = await readAllRows('event_cards', 'id,event_slug');
+    const dbByEvent = new Map();
+    const existingKeys = new Set();
+    for (const row of dbRows) { const slug = String(row.event_slug); dbByEvent.set(slug, (dbByEvent.get(slug) || 0) + 1); existingKeys.add(`${slug}:${String(row.id)}`); }
+    const allMatch = Object.entries(summary.byEvent).every(([slug, total]) => (dbByEvent.get(slug) || 0) === total) && Object.keys(Object.fromEntries(dbByEvent)).every(slug => Object.prototype.hasOwnProperty.call(summary.byEvent, slug));
+    if (allMatch) {
+      if (state.events.storage !== 'available') await rebuildEventStorage();
+      await recordNoopRun('events', trigger, summary.total, dbRows.length, { byEvent: summary.byEvent });
+      await supabase.from('catalog_state').update({ last_checked_at: new Date().toISOString(), status: 'ready', last_error: null, metadata: { trigger, mode: 'per-event-count-match', sourceTotal: summary.total, byEvent: summary.byEvent } }).eq('catalog', 'events');
+      state.events.count = dbRows.length; state.events.error = null; state.events.countsMatch = true;
+      logger.log('SUCCESS', 'scraper-events', 'Every event count matches; skipped event-card scan and writes', { sourceTotal: summary.total, databaseCount: dbRows.length, byEvent: summary.byEvent, trigger });
+    } else {
+      logger.log('WARN', 'scraper-events', 'At least one event count differs; scanning only for missing event/card pairs', { sourceTotal: summary.total, databaseCount: dbRows.length, byEvent: summary.byEvent, databaseByEvent: Object.fromEntries(dbByEvent), trigger });
+      const scraper = new ShoobEventScraper({ existingKeys });
+      const missing = await scraper.fetchAll();
+      state.events.expected = summary.total;
+      if (!missing.length) {
+        const note = 'Per-event source and database counts differ, but no missing event/card pairs were found. No records were deleted.';
+        logger.log('WARN', 'scraper-events', note, { sourceTotal: summary.total, databaseCount: dbRows.length, trigger });
+        await recordNoopRun('events', trigger, summary.total, dbRows.length, { mode: 'count-mismatch-no-missing-ids', warning: note, byEvent: summary.byEvent });
+        await supabase.from('catalog_state').update({ last_checked_at: new Date().toISOString(), status: 'ready', last_error: note, metadata: { trigger, sourceTotal: summary.total, databaseCount: dbRows.length, warning: note, byEvent: summary.byEvent } }).eq('catalog', 'events');
+        state.events.count = dbRows.length; state.events.countsMatch = false;
+      } else {
+        if (dbRows.length > 0 && missing.length > Math.max(2000, summary.total * 0.5)) throw new Error(`Safety stop: ${missing.length} missing event-card pairs is an unexpectedly large delta`);
+        await syncEvents(missing, trigger, scraper, summary.total);
+      }
+    }
+    state.events.menuChecked = summary.menuChecked; state.events.unknownEvents = summary.unknownEvents || [];
     state.events.finishedAt = new Date().toISOString();
-  } catch (e) { state.events.error = e.message || String(e); logger.log('ERROR', 'scraper-events', 'Event scrape/sync failed; retaining last known-good catalog', { error: state.events.error }); }
+  } catch (e) { state.events.error = e.message || String(e); const unknownMatch = state.events.error.match(/New Shoob event\(s\) need to be added before syncing: (.+)$/); if (unknownMatch) { state.events.menuChecked = true; state.events.unknownEvents = unknownMatch[1].split(',').map(x => x.trim()).filter(Boolean); } else if (/event menu could not be verified/i.test(state.events.error)) { state.events.menuChecked = false; state.events.menuError = state.events.error; } logger.log('ERROR', 'scraper-events', 'Event incremental check failed; retaining last known-good catalog', { error: state.events.error, unknownEvents: state.events.unknownEvents }); }
   finally { state.events.isScraping = false; }
 }
 async function hasCatalog(catalog, table) {
-  const { data: stateRow, error: stateErr } = await supabase.from('catalog_state').select('record_count,status,storage_path,last_synced_at').eq('catalog', catalog).maybeSingle();
+  const { data: stateRow, error: stateErr } = await supabase.from('catalog_state').select('record_count,status,storage_path,last_synced_at,metadata').eq('catalog', catalog).maybeSingle();
   if (stateErr) throw stateErr;
   const { count, error } = await supabase.from(table).select('id', { count: 'exact', head: true });
   if (error) throw error;
@@ -169,7 +270,7 @@ async function hasCatalog(catalog, table) {
   const { data: objects, error: storageErr } = await supabase.storage.from(process.env.SUPABASE_STORAGE_BUCKET || 'shoob-catalogs').list('', { search: storagePath, limit: 10 });
   if (storageErr) throw storageErr;
   const storageExists = (objects || []).some(o => o.name === storagePath);
-  const dbExists = (count || 0) > 0 && stateRow?.status === 'ready';
+  const dbExists = stateRow?.status === 'ready' && ((count || 0) > 0 || stateRow?.metadata?.sourceTotal === 0);
   return { present: dbExists && storageExists, dbCount: count || 0, stateRow, storageExists };
 }
 async function monitorOnce() {
@@ -180,8 +281,8 @@ async function monitorOnce() {
     if (error) throw error;
     state.supabaseReachable = true; state.supabaseError = null; state.lastMonitorOk = true;
     const [main, events] = await Promise.all([hasCatalog('cards', 'cards'), hasCatalog('events', 'event_cards')]);
-    state.cards.count = main.dbCount; state.cards.storage = main.storageExists ? 'available' : 'missing';
-    state.events.count = events.dbCount; state.events.storage = events.storageExists ? 'available' : 'missing';
+    state.cards.count = main.dbCount; state.cards.storage = main.storageExists ? 'available' : 'missing'; state.cards.lastSyncAt = main.stateRow?.last_synced_at || state.cards.lastSyncAt; state.cards.sourceTotal = main.stateRow?.metadata?.sourceTotal ?? state.cards.sourceTotal;
+    state.events.count = events.dbCount; state.events.storage = events.storageExists ? 'available' : 'missing'; state.events.lastSyncAt = events.stateRow?.last_synced_at || state.events.lastSyncAt; state.events.sourceTotal = events.stateRow?.metadata?.sourceTotal ?? state.events.sourceTotal;
     if (!main.present && !state.cards.isScraping) { logger.log('WARN', 'monitor', 'Main catalog missing/incomplete; starting recovery', main); void scrapeMainAndSync('startup-recovery'); }
     if (!events.present && !state.events.isScraping) { logger.log('WARN', 'monitor', 'Event catalog missing/incomplete; starting recovery', events); void scrapeEventsAndSync('startup-recovery'); }
   } catch (e) {
@@ -205,7 +306,7 @@ async function sourceCheck() {
   return syncPromise;
 }
 
-app.get(['/api/health', '/ping'], (req, res) => res.json({ ok: true, service: 'Shoob scraper', uptimeSeconds: Math.floor(process.uptime()), node: process.version, timestamp: new Date().toISOString() }));
+app.get(['/api/health', '/ping'], (req, res) => { const healthy = !!supabase && state.supabaseReachable; res.status(healthy ? 200 : 503).json({ ok: healthy, service: 'Shoob Control Room', supabaseConfigured, supabaseReachable: state.supabaseReachable, activeJobs: { cards: state.cards.isScraping, events: state.events.isScraping }, uptimeSeconds: Math.floor(process.uptime()), node: process.version, timestamp: new Date().toISOString() }); });
 app.get('/api/status', (req, res) => res.json({ ok: true, uptimeSeconds: Math.floor(process.uptime()), ...state, memory: { rssMb: +(process.memoryUsage().rss / 1048576).toFixed(1), heapMb: +(process.memoryUsage().heapUsed / 1048576).toFixed(1) }, logBuffer: { max: logger.MAX_LOGS, current: logger.list({ limit: logger.MAX_LOGS }).length }, monitorIntervalMs: MONITOR_MS, sourceCheckIntervalMs: SHOOB_CHECK_MS }));
 app.post('/api/admin/login', (req, res) => {
   if (!process.env.ADMIN_KEY) return res.status(503).json({ ok: false, error: 'ADMIN_KEY is not configured on Render' });
@@ -233,9 +334,12 @@ app.get('/api/admin/sync-runs', requireAdmin, async (req, res) => {
 app.post('/api/admin/sync', requireAdmin, async (req, res) => {
   const target = req.body?.catalog;
   if (!['cards','events','both'].includes(target)) return res.status(400).json({ ok: false, error: 'catalog must be cards, events, or both' });
+  if ((target === 'cards' || target === 'both') && state.cards.isScraping) return res.status(409).json({ ok: false, error: 'Main-card check is already running. Refresh status instead of starting another.' });
+  if ((target === 'events' || target === 'both') && state.events.isScraping) return res.status(409).json({ ok: false, error: 'Event check is already running. Refresh status instead of starting another.' });
+  if (!supabase) return res.status(503).json({ ok: false, error: 'Supabase is not configured; sync was not started.' });
   if (target === 'cards' || target === 'both') void scrapeMainAndSync('manual-admin');
   if (target === 'events' || target === 'both') void scrapeEventsAndSync('manual-admin');
-  res.status(202).json({ ok: true, message: 'Requested sync queued', catalog: target });
+  res.status(202).json({ ok: true, message: 'Incremental check queued: published counts are checked first; a card scan runs only if counts differ.', catalog: target, mode: 'incremental' });
 });
 app.post('/api/internal/logs', requireInternalOrAdmin, (req, res) => {
   const events = Array.isArray(req.body?.events) ? req.body.events.slice(0, 100) : [req.body];

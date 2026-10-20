@@ -168,8 +168,9 @@ async function fetchMenuSlugs() {
 }
 
 class ShoobEventScraper {
-  constructor({ events = KNOWN_EVENTS } = {}) {
+  constructor({ events = KNOWN_EVENTS, existingKeys = null } = {}) {
     this.events = events;
+    this.existingKeys = existingKeys ? new Set([...existingKeys].map(String)) : null;
     this.cards = [];
     this.expectedTotal = null;
     this.responseEvent = "cardeventindexres";
@@ -223,6 +224,32 @@ class ShoobEventScraper {
     }
   }
 
+  async fetchSummary() {
+    const socket = io(SHOOB_URL, { transports: ["websocket"], reconnection: false, timeout: REQUEST_TIMEOUT });
+    return new Promise((resolve, reject) => {
+      const fail = err => { socket.disconnect(); reject(err instanceof Error ? err : new Error(String(err))); };
+      socket.once("connect_error", err => fail(new Error(`Socket connection error: ${err.message}`)));
+      socket.once("connect", async () => {
+        try {
+          await this._runPreflight();
+          if (!this.menuChecked) throw new Error(`Shoob event menu could not be verified (${this.menuError || "unknown error"}); refusing an incomplete event sync`);
+          if (this.unknownEvents.length) throw new Error(`New Shoob event(s) need to be added before syncing: ${this.unknownEvents.join(", ")}`);
+          const totals = {};
+          for (const slug of this.events) {
+            const raw = await this._requestPage(socket, slug, 1);
+            const { docs, totalDocs } = extractPage(raw);
+            if (totalDocs === null || !Number.isFinite(totalDocs) || totalDocs < 0) throw new Error(`Shoob did not return a trustworthy total for event ${slug}`);
+            totals[slug] = totalDocs;
+            this.eventStats[slug] = { expected: totalDocs, collected: 0 };
+          }
+          this.expectedTotal = Object.values(totals).reduce((a, b) => a + b, 0);
+          socket.disconnect();
+          resolve({ total: this.expectedTotal, byEvent: totals, menuChecked: this.menuChecked, unknownEvents: this.unknownEvents });
+        } catch (err) { fail(err); }
+      });
+    });
+  }
+
   async fetchAll() {
     console.log(`[Event Scraper] Connecting to ${SHOOB_URL}...`);
 
@@ -257,9 +284,7 @@ class ShoobEventScraper {
               this.eventStats[eventSlug] = { expected: total, collected: 0 };
               console.log(`[Discovery] ${eventSlug}: ${total} cards`);
             } catch (e) {
-              console.warn(`[Discovery] ${eventSlug} failed: ${e.message}`);
-              eventTotals[eventSlug] = 0;
-              this.eventStats[eventSlug] = { expected: 0, collected: 0 };
+              throw new Error(`Event discovery failed for ${eventSlug}; refusing partial catalog: ${e.message}`);
             }
           }
           this.expectedTotal = Object.values(eventTotals).reduce((a, b) => a + b, 0);
@@ -288,13 +313,14 @@ class ShoobEventScraper {
 
               for (const card of docs) {
                 try {
+                  const rawId = first(card, "_id", "id", "cardid");
+                  const key = `${eventSlug}:${String(rawId ?? "")}`;
+                  if (this.existingKeys && this.existingKeys.has(key)) continue;
                   const normalized = normalizeEventCard(card, eventSlug);
-                  if (!this.cards.some((c) => c.id === normalized.id)) {
+                  if (!this.cards.some((c) => c.id === normalized.id && c.event === normalized.event)) {
                     this.cards.push(normalized);
                     collectedThisEvent++;
-                    if (this.eventStats[eventSlug]) {
-                      this.eventStats[eventSlug].collected = collectedThisEvent;
-                    }
+                    if (this.eventStats[eventSlug]) this.eventStats[eventSlug].collected = collectedThisEvent;
                   }
                 } catch (exc) {
                   console.warn(`[Warning] Skipping invalid event card: ${exc.message}`);
@@ -314,7 +340,7 @@ class ShoobEventScraper {
           this.phase = "done";
           socket.disconnect();
 
-          if (this.cards.length === 0) {
+          if (this.cards.length === 0 && !this.existingKeys) {
             return reject(new Error("Shoob returned 0 event cards"));
           }
 

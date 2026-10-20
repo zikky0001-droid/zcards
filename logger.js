@@ -11,7 +11,7 @@ function log(level, component, message, details = {}) {
     timestamp: new Date().toISOString(),
     level: String(level || 'INFO').toUpperCase(),
     component: String(component || 'app').slice(0, 80),
-    message: String(message || '').slice(0, 2000),
+    message: sanitizeString(String(message || '')).slice(0, 2000),
     details: sanitize(details),
   };
   entries.push(entry);
@@ -23,9 +23,15 @@ function log(level, component, message, details = {}) {
   if (persistLog) Promise.resolve().then(() => persistLog(entry)).catch(() => {});
   return entry;
 }
+function sanitizeString(input) {
+  return String(input)
+    .replace(/(Bearer\s+)[A-Za-z0-9._~+\/-]+=*/gi, '$1[REDACTED]')
+    .replace(/(service[_-]?role[_-]?key\s*[:=]\s*)[^\s,;]+/gi, '$1[REDACTED]')
+    .replace(/((?:api[_-]?key|access[_-]?token|refresh[_-]?token|secret|password)\s*[:=]\s*)[^\s,;]+/gi, '$1[REDACTED]');
+}
 function sanitize(value, depth = 0) {
   if (depth > 4) return '[truncated]';
-  if (value === null || ['string','number','boolean'].includes(typeof value)) return typeof value === 'string' ? value.slice(0, 1000) : value;
+  if (value === null || ['string','number','boolean'].includes(typeof value)) return typeof value === 'string' ? sanitizeString(value).slice(0, 1000) : value;
   if (Array.isArray(value)) return value.slice(0, 30).map(v => sanitize(v, depth + 1));
   if (typeof value !== 'object') return String(value).slice(0, 200);
   const out = {};

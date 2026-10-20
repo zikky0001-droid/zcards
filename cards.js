@@ -146,11 +146,34 @@ function extractPage(payload) {
 }
 
 class ShoobCardScraper {
-  constructor({ category = null } = {}) {
+  constructor({ category = null, existingIds = null } = {}) {
     this.category = category;
+    this.existingIds = existingIds ? new Set([...existingIds].map(String)) : null;
     this.cards = [];
     this.responseEvent = "cardindexres";
     this.expectedTotal = null;
+  }
+
+  async fetchSummary() {
+    const socket = io(SHOOB_URL, { transports: ["websocket"], reconnection: false, timeout: REQUEST_TIMEOUT });
+    return new Promise((resolve, reject) => {
+      const fail = (err) => { socket.disconnect(); reject(err instanceof Error ? err : new Error(String(err))); };
+      socket.once("connect_error", (err) => fail(new Error(`Socket connection error: ${err.message}`)));
+      socket.once("connect", async () => {
+        try {
+          const raw = await new Promise((res, rej) => {
+            const timer = setTimeout(() => { socket.off(this.responseEvent); rej(new Error("Timed out checking Shoob's published card count")); }, REQUEST_TIMEOUT);
+            socket.once(this.responseEvent, payload => { clearTimeout(timer); res(payload); });
+            socket.emit("cardindex", { page: 1, category: this.category, search: "", series: null });
+          });
+          const parsed = extractPage(raw);
+          if (!Number.isFinite(parsed.totalDocs) || parsed.totalDocs < 1) throw new Error("Shoob did not return a trustworthy published total; sync aborted safely");
+          this.expectedTotal = parsed.totalDocs;
+          socket.disconnect();
+          resolve({ total: parsed.totalDocs, firstPageCount: parsed.docs.length });
+        } catch (err) { fail(err); }
+      });
+    });
   }
 
   async fetchAll() {
@@ -207,6 +230,8 @@ class ShoobCardScraper {
             let newCardsAdded = 0;
             for (const card of docs) {
               try {
+                const rawId = first(card, "_id", "id", "cardid");
+                if (this.existingIds && rawId != null && this.existingIds.has(String(rawId))) continue;
                 const normalized = normalizeCard(card);
                 if (!this.cards.some((c) => c.id === normalized.id)) {
                   this.cards.push(normalized);
@@ -230,7 +255,7 @@ class ShoobCardScraper {
 
           socket.disconnect();
 
-          if (this.cards.length === 0) {
+          if (this.cards.length === 0 && !this.existingIds) {
             return reject(new Error("Shoob returned 0 cards; output file was not changed"));
           }
 
