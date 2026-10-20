@@ -1,18 +1,10 @@
 {
-  "name": "shoob-scraper",
-  "version": "1.0.0",
+  "name": "shoob-card-scraper",
+  "version": "2.0.0",
   "private": true,
+  "description": "Shoob card and event scraper with Supabase sync and protected admin dashboard",
   "main": "server.js",
-  "scripts": {
-    "start": "node server.js",
-    "scrape": "node cards.js"
-  },
-  "dependencies": {
-    "express": "^4.19.2",
-    "socket.io-client": "^4.7.5"
-  },
-  "engines": {
-    "node": ">=20"
-  }
+  "scripts": { "start": "node server.js", "scrape:cards": "node cards.js", "scrape:events": "node events.js" },
+  "engines": { "node": ">=20" },
+  "dependencies": { "@supabase/supabase-js": "^2.57.0", "express": "^5.1.0", "socket.io-client": "^4.8.1" }
 }
-
