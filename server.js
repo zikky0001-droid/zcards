@@ -2085,7 +2085,7 @@ function finishDeletion(
     {
       requested: all ? 'all' : requested,
       results,
-      actorIp: req.ip || null,
+      UserIp: getIpDiagnostics(req).User_Ip_Address || req.ip || null,
     }
   );
 
