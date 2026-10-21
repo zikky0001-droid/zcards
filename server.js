@@ -1,3 +1,5 @@
+// server.js
+
 'use strict';
 const express = require('express');
 const path = require('node:path');
@@ -10,7 +12,13 @@ const logger = require('./logger.js');
 const app = express();
 const PORT = Number(process.env.PORT || 3000);
 const MONITOR_MS = 10_000;
-const SHOOB_CHECK_MS = 8 * 60 * 60 * 1000;
+const SCHEDULER_POLL_MS = 10_000;
+const SHOOB_CHECK_MS = 60 * 60 * 1000; // one hour check 
+const SELF_PING_MS = 14 * 60 * 1000;
+const RETENTION_MS = 7 * 24 * 60 * 60 * 1000;
+const RETENTION_CLEANUP_MS = 6 * 60 * 60 * 1000;
+const RETENTION_BATCH_SIZE = 500;
+const LAGOS_TIME_ZONE = 'Africa/Lagos';
 const LOG_TABLE = 'system_logs';
 app.disable('x-powered-by');
 app.set('json spaces', 2);
@@ -29,6 +37,16 @@ const state = {
   nextSourceCheckAt: null, lastSourceCheckAt: null,
   cards: { isScraping: false, startedAt: null, finishedAt: null, count: 0, expected: null, sourceTotal: null, countsMatch: null, lastDelta: 0, error: null, lastSyncAt: null, storage: 'unknown' },
   events: { isScraping: false, startedAt: null, finishedAt: null, count: 0, expected: null, sourceTotal: null, countsMatch: null, lastDelta: 0, error: null, lastSyncAt: null, storage: 'unknown', menuChecked: null, menuError: null, unknownEvents: [] },
+  scheduler: {
+    timeZone: LAGOS_TIME_ZONE,
+    lastSlotAttempted: null,
+    lastSlotSucceeded: null,
+    lastCheckStatus: 'waiting',
+    lastCheckError: null,
+    retryAt: null,
+  },
+  selfPing: { lastAttemptAt: null, lastSuccessAt: null, lastError: null },
+  retention: { lastRunAt: null, lastSuccessAt: null, lastError: null, systemLogsDeleted: 0, syncRunsDeleted: 0 },
 };
 let memoryCards = null, memoryEventCards = null;
 let syncPromise = null;
@@ -290,24 +308,177 @@ async function monitorOnce() {
     logger.log('ERROR', 'monitor', 'Supabase monitor check failed; will retry', { error: state.supabaseError });
   }
 }
-async function sourceCheck() {
+
+function lagosClockParts(date = new Date()) {
+  const parts = new Intl.DateTimeFormat('en-GB', {
+    timeZone: LAGOS_TIME_ZONE,
+    year: 'numeric', month: '2-digit', day: '2-digit',
+    hour: '2-digit', minute: '2-digit', hourCycle: 'h23',
+  }).formatToParts(date);
+  return Object.fromEntries(parts.filter(p => p.type !== 'literal').map(p => [p.type, p.value]));
+}
+
+function lagosHourSlot(date = new Date()) {
+  const p = lagosClockParts(date);
+  return `${p.year}-${p.month}-${p.day} ${p.hour}:00`;
+}
+
+function nextLagosHourIso(date = new Date()) {
+  // Lagos is UTC+1 and does not currently observe daylight-saving time.
+  const p = lagosClockParts(date);
+  return new Date(Date.UTC(Number(p.year), Number(p.month) - 1, Number(p.day), Number(p.hour), 0, 0, 0)).toISOString();
+}
+
+async function deleteOldRowsInBatches(table, timestampColumn, cutoffIso) {
+  let totalDeleted = 0;
+  for (;;) {
+    const { data, error } = await supabase
+      .from(table)
+      .select('id')
+      .lt(timestampColumn, cutoffIso)
+      .limit(RETENTION_BATCH_SIZE);
+    if (error) throw error;
+    const ids = (data || []).map(row => row.id).filter(id => id !== null && id !== undefined);
+    if (!ids.length) break;
+    const { error: deleteError } = await supabase.from(table).delete().in('id', ids);
+    if (deleteError) throw deleteError;
+    totalDeleted += ids.length;
+    if (ids.length < RETENTION_BATCH_SIZE) break;
+  }
+  return totalDeleted;
+}
+
+let retentionPromise = null;
+async function runRetentionCleanup(trigger = 'scheduled') {
+  if (!supabase) throw new Error('Supabase is not configured; retention cleanup cannot run');
+  if (retentionPromise) return retentionPromise;
+  retentionPromise = (async () => {
+    const startedAt = new Date().toISOString();
+    const cutoffIso = new Date(Date.now() - RETENTION_MS).toISOString();
+    state.retention.lastRunAt = startedAt;
+    logger.log('INFO', 'retention', 'Seven-day temporary-data cleanup started', { trigger, cutoff: cutoffIso });
+    try {
+      const systemLogsDeleted = await deleteOldRowsInBatches('system_logs', 'timestamp', cutoffIso);
+      const syncRunsDeleted = await deleteOldRowsInBatches('sync_runs', 'started_at', cutoffIso);
+      state.retention.systemLogsDeleted = systemLogsDeleted;
+      state.retention.syncRunsDeleted = syncRunsDeleted;
+      state.retention.lastSuccessAt = new Date().toISOString();
+      state.retention.lastError = null;
+      logger.log('SUCCESS', 'retention', 'Seven-day temporary-data cleanup completed', {
+        trigger, cutoff: cutoffIso, systemLogsDeleted, syncRunsDeleted,
+        protectedTables: ['cards', 'event_cards'],
+        protectedStorageFiles: ['cards.json', 'events.json'],
+      });
+      return { systemLogsDeleted, syncRunsDeleted };
+    } catch (error) {
+      state.retention.lastError = error?.message || String(error);
+      logger.log('ERROR', 'retention', 'Seven-day cleanup failed; it will be retried', { trigger, error: state.retention.lastError });
+      throw error;
+    }
+  })().finally(() => { retentionPromise = null; });
+  return retentionPromise;
+}
+
+let selfPingPromise = null;
+let selfPingHasWarned = false;
+async function selfPingOnce() {
+  const baseUrl = String(process.env.SELF_PING_URL || process.env.RENDER_EXTERNAL_URL || '').trim().replace(/\/+$/, '');
+  if (!baseUrl) {
+    if (!selfPingHasWarned) {
+      selfPingHasWarned = true;
+      logger.log('WARN', 'self-ping', 'Self-ping is not configured; set SELF_PING_URL or ensure RENDER_EXTERNAL_URL is available');
+    }
+    return;
+  }
+  if (selfPingPromise) return selfPingPromise;
+  selfPingPromise = (async () => {
+    const url = /\/ping$/i.test(baseUrl) ? baseUrl : `${baseUrl}/ping`;
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 10_000);
+    state.selfPing.lastAttemptAt = new Date().toISOString();
+    try {
+      const response = await fetch(url, { method: 'GET', signal: controller.signal, headers: { 'user-agent': 'Shoob-Control-Room-self-ping' } });
+      if (!response.ok) throw new Error(`Self-ping returned HTTP ${response.status}`);
+      const wasFailing = !!state.selfPing.lastError;
+      state.selfPing.lastSuccessAt = new Date().toISOString();
+      state.selfPing.lastError = null;
+      if (wasFailing) logger.log('SUCCESS', 'self-ping', 'Self-ping recovered', { url, status: response.status });
+    } catch (error) {
+      state.selfPing.lastError = error?.message || String(error);
+      logger.log('WARN', 'self-ping', 'Self-ping failed; the next scheduled ping will retry', { url, error: state.selfPing.lastError });
+    } finally {
+      clearTimeout(timeout);
+      selfPingPromise = null;
+    }
+  })();
+  return selfPingPromise;
+}
+
+let schedulerPromise = null;
+async function schedulerTick() {
+  if (schedulerPromise) return schedulerPromise;
+  const slot = lagosHourSlot();
+  state.nextSourceCheckAt = nextLagosHourIso();
+  if (state.scheduler.lastSlotSucceeded === slot) return;
+  const retryAt = state.scheduler.retryAt ? Date.parse(state.scheduler.retryAt) : 0;
+  if (state.scheduler.lastSlotAttempted === slot && retryAt > Date.now()) return;
+  if (syncPromise || state.cards.isScraping || state.events.isScraping) return;
+
+  schedulerPromise = (async () => {
+    state.scheduler.lastSlotAttempted = slot;
+    state.scheduler.lastCheckStatus = 'running';
+    state.scheduler.lastCheckError = null;
+    logger.log('INFO', 'scheduler', 'Hourly Shoob cards and events check started', { slot, timeZone: LAGOS_TIME_ZONE });
+    try {
+      await sourceCheck(`scheduled-hourly-${slot}`);
+      // The scraper functions record failures in state instead of throwing, so inspect both results.
+      const failures = [state.cards.error && `cards: ${state.cards.error}`, state.events.error && `events: ${state.events.error}`].filter(Boolean);
+      if (failures.length) throw new Error(failures.join(' | '));
+      state.scheduler.lastSlotSucceeded = slot;
+      state.scheduler.lastCheckStatus = 'success';
+      state.scheduler.lastCheckError = null;
+      state.scheduler.retryAt = null;
+      logger.log('SUCCESS', 'scheduler', 'Hourly Shoob cards and events check completed', { slot, timeZone: LAGOS_TIME_ZONE });
+    } catch (error) {
+      state.scheduler.lastCheckStatus = 'failed';
+      state.scheduler.lastCheckError = error?.message || String(error);
+      state.scheduler.retryAt = new Date(Date.now() + 5 * 60 * 1000).toISOString();
+      logger.log('ERROR', 'scheduler', 'Hourly check failed; retry scheduled in five minutes', { slot, retryAt: state.scheduler.retryAt, error: state.scheduler.lastCheckError });
+    }
+  })().finally(() => { schedulerPromise = null; });
+  return schedulerPromise;
+}
+
+async function sourceCheck(trigger = 'scheduled-hourly') {
   if (syncPromise) return syncPromise;
   if (state.cards.isScraping || state.events.isScraping) {
-    logger.log('INFO', 'scheduler', 'Source check deferred because recovery scrape is already running');
-    setTimeout(() => void sourceCheck().catch(e => logger.log('ERROR','scheduler','Deferred source check failed',{error:e.message})), 60_000).unref();
-    return;
+    throw new Error('Source check deferred because a cards/events recovery scrape is already running');
   }
   syncPromise = (async () => {
     state.lastSourceCheckAt = new Date().toISOString();
-    state.nextSourceCheckAt = new Date(Date.now() + SHOOB_CHECK_MS).toISOString();
-    logger.log('INFO', 'scheduler', 'Eight-hour Shoob refresh started');
-    await Promise.all([scrapeMainAndSync('scheduled-8h'), scrapeEventsAndSync('scheduled-8h')]);
+    state.nextSourceCheckAt = nextLagosHourIso();
+    await Promise.all([
+      scrapeMainAndSync(trigger),
+      scrapeEventsAndSync(trigger),
+    ]);
+    const failures = [state.cards.error && `cards: ${state.cards.error}`, state.events.error && `events: ${state.events.error}`].filter(Boolean);
+    if (failures.length) throw new Error(failures.join(' | '));
   })().finally(() => { syncPromise = null; });
   return syncPromise;
 }
 
 app.get(['/api/health', '/ping'], (req, res) => { const healthy = !!supabase && state.supabaseReachable; res.status(healthy ? 200 : 503).json({ ok: healthy, service: 'Shoob Control Room', supabaseConfigured, supabaseReachable: state.supabaseReachable, activeJobs: { cards: state.cards.isScraping, events: state.events.isScraping }, uptimeSeconds: Math.floor(process.uptime()), node: process.version, timestamp: new Date().toISOString() }); });
-app.get('/api/status', (req, res) => res.json({ ok: true, uptimeSeconds: Math.floor(process.uptime()), ...state, memory: { rssMb: +(process.memoryUsage().rss / 1048576).toFixed(1), heapMb: +(process.memoryUsage().heapUsed / 1048576).toFixed(1) }, logBuffer: { max: logger.MAX_LOGS, current: logger.list({ limit: logger.MAX_LOGS }).length }, monitorIntervalMs: MONITOR_MS, sourceCheckIntervalMs: SHOOB_CHECK_MS }));
+app.get('/api/status', (req, res) => res.json({
+  ok: true, uptimeSeconds: Math.floor(process.uptime()), ...state,
+  memory: { rssMb: +(process.memoryUsage().rss / 1048576).toFixed(1), heapMb: +(process.memoryUsage().heapUsed / 1048576).toFixed(1) },
+  logBuffer: { max: logger.MAX_LOGS, current: logger.list({ limit: logger.MAX_LOGS }).length },
+  monitorIntervalMs: MONITOR_MS,
+  schedulerPollIntervalMs: SCHEDULER_POLL_MS,
+  sourceCheckIntervalMs: SHOOB_CHECK_MS,
+  selfPingIntervalMs: SELF_PING_MS,
+  retentionDays: 7,
+  retentionCleanupIntervalMs: RETENTION_CLEANUP_MS,
+}));
 app.post('/api/admin/login', (req, res) => {
   if (!process.env.ADMIN_KEY) return res.status(503).json({ ok: false, error: 'ADMIN_KEY is not configured on Render' });
   if (!safeEqual(String(req.body?.key || ''), process.env.ADMIN_KEY)) { logger.log('WARN', 'security', 'Failed admin login attempt', { ip: req.ip }); return res.status(401).json({ ok: false, error: 'Invalid admin key' }); }
@@ -380,15 +551,28 @@ app.get('/api/admin/catalog', requireAdmin, async (req, res) => {
 app.use((req, res) => res.status(404).json({ ok: false, error: 'Endpoint not found', path: req.path }));
 
 const server = app.listen(PORT, () => {
-  logger.log('SUCCESS', 'startup', 'Shoob scraper service listening', { port: PORT, node: process.version, supabaseConfigured });
-  state.nextSourceCheckAt = new Date(Date.now() + SHOOB_CHECK_MS).toISOString();
-  void monitorOnce(); // immediate startup check
+  logger.log('SUCCESS', 'startup', 'Shoob scraper service listening', {
+    port: PORT, node: process.version, supabaseConfigured,
+    timeZone: LAGOS_TIME_ZONE, hourlySlots: 24,
+  });
+  state.nextSourceCheckAt = nextLagosHourIso();
+  void monitorOnce();
   setInterval(() => void monitorOnce(), MONITOR_MS).unref();
-  setInterval(() => void sourceCheck().catch(e => logger.log('ERROR','scheduler','Scheduled source check failed',{error:e.message})), SHOOB_CHECK_MS).unref();
-  // Run one initial source check after recovery monitor has had a chance to inspect the catalogs.
-  setTimeout(() => void sourceCheck().catch(e => logger.log('ERROR','scheduler','Initial source check failed',{error:e.message})), 30_000).unref();
+  setInterval(() => void schedulerTick().catch(error => logger.log('ERROR', 'scheduler', 'Scheduler tick failed', { error: error?.message || String(error) })), SCHEDULER_POLL_MS).unref();
+  setInterval(() => void selfPingOnce(), SELF_PING_MS).unref();
+  // Run a catch-up check after the startup monitor has had a chance to inspect catalogs.
+  setTimeout(() => void schedulerTick().catch(error => logger.log('ERROR', 'scheduler', 'Initial scheduler check failed', { error: error?.message || String(error) })), 30_000).unref();
+  // First cleanup after startup settles, then every six hours. A failure is retried on the next interval.
+  setTimeout(() => void runRetentionCleanup('startup').catch(() => {}), 60_000).unref();
+  setInterval(() => void runRetentionCleanup('scheduled').catch(() => {}), RETENTION_CLEANUP_MS).unref();
+  // First self-ping after startup settles; recurring pings run every 14 minutes.
+  setTimeout(() => void selfPingOnce(), 90_000).unref();
 });
 const shutdown = signal => { logger.log('WARN','shutdown',`${signal} received; closing HTTP server`); server.close(() => process.exit(0)); setTimeout(() => process.exit(1), 10000).unref(); };
 process.once('SIGTERM', () => shutdown('SIGTERM')); process.once('SIGINT', () => shutdown('SIGINT'));
 process.on('uncaughtException', e => logger.log('ERROR','process','Uncaught exception',{error:e?.message || String(e)}));
 process.on('unhandledRejection', e => logger.log('ERROR','process','Unhandled rejection',{error:e?.message || String(e)}));
+
+
+// end of server.js 
+
