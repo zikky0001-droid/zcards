@@ -1,3 +1,5 @@
+// logger.js 
+
 'use strict';
 
 const MAX_LOGS = 5000;
@@ -75,5 +77,29 @@ function list({ limit = 500, level, search, before } = {}) {
   return result.slice(-Math.max(1, Math.min(Number(limit) || 500, MAX_LOGS))).reverse();
 }
 
-function clear() { entries.length = 0; }
-module.exports = { MAX_LOGS, RETENTION_MS, log, list, clear, setLogPersistence, pruneOldEntries };
+// Removes every entry from the live buffer and returns how many were removed.
+function clear() {
+  const removed = entries.length;
+  entries.length = 0;
+  return removed;
+}
+
+// Removes the entries whose ids are listed and returns how many were removed.
+// Compacts the array in place so other references to `entries` stay valid.
+function removeByIds(ids) {
+  const wanted = new Set(Array.isArray(ids) ? ids.map(String) : []);
+  if (!wanted.size) return 0;
+  const before = entries.length;
+  let write = 0;
+  for (let read = 0; read < entries.length; read++) {
+    const entry = entries[read];
+    if (!wanted.has(entry.id)) entries[write++] = entry;
+  }
+  entries.length = write;
+  return before - write;
+}
+
+module.exports = { MAX_LOGS, RETENTION_MS, log, list, clear, removeByIds, setLogPersistence, pruneOldEntries };
+
+
+// end of logger.js

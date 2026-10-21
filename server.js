@@ -190,7 +190,7 @@ function getIpDiagnostics(req) {
       ? forwardedChain.join(', ')
       : null,
 
-    forwardedClientCandidate:
+    User_Ip_Address:
       forwardedChain[0] || null,
 
     cloudflareConnectingIp:
@@ -1686,11 +1686,9 @@ app.get('/api/status', (req, res) =>
   })
 );
 
-// line 1689 
 // -----------------------------------------------------------------------------
 // Admin login: updated IP diagnostics
 // -----------------------------------------------------------------------------
-
 app.post('/api/admin/login', (req, res) => {
   if (!process.env.ADMIN_KEY) {
     return res.status(503).json({
@@ -1932,6 +1930,261 @@ app.post('/api/admin/sync', requireAdmin, async (req, res) => {
   });
 });
 
+// -----------------------------------------------------------------------------
+// Admin: delete logs and sync history
+// -----------------------------------------------------------------------------
+const MAX_DELETE_IDS = 500;
+const DELETE_CHUNK_SIZE = 100;
+
+function cleanDeleteIds(raw) {
+  if (!Array.isArray(raw)) return [];
+
+  const out = new Set();
+
+  for (const value of raw) {
+    if (typeof value === 'number' && Number.isFinite(value)) {
+      out.add(String(value));
+    } else if (
+      typeof value === 'string' &&
+      value.length > 0 &&
+      value.length <= 100
+    ) {
+      out.add(value);
+    }
+  }
+
+  return [...out];
+}
+
+function isMissingTableError(error) {
+  return /does not exist|schema cache/i.test(error?.message || '');
+}
+
+// Deletes by id (in chunks) or, when ids is null, every row in the table.
+// protectRunning keeps sync runs that are still in progress.
+async function deleteRows(table, { ids = null, protectRunning = false } = {}) {
+  const chunks = ids
+    ? Array.from(
+        { length: Math.ceil(ids.length / DELETE_CHUNK_SIZE) },
+        (_, i) =>
+          ids.slice(i * DELETE_CHUNK_SIZE, (i + 1) * DELETE_CHUNK_SIZE)
+      )
+    : [null];
+
+  let deleted = 0;
+
+  try {
+    for (const chunk of chunks) {
+      let query = supabase.from(table).delete({ count: 'exact' });
+
+      query = chunk
+        ? query.in('id', chunk)
+        : query.not('id', 'is', null);
+
+      if (protectRunning) {
+        query = query.or('status.is.null,status.neq.running');
+      }
+
+      const { error, count } = await query;
+
+      if (error) throw error;
+
+      deleted += count || 0;
+    }
+  } catch (error) {
+    error.partialDeleted = deleted;
+    throw error;
+  }
+
+  return deleted;
+}
+
+async function deleteFromDatabase(table, options) {
+  if (!supabase) {
+    return {
+      status: 'skipped',
+      deleted: 0,
+      reason: 'Supabase is not configured',
+    };
+  }
+
+  try {
+    return {
+      status: 'ok',
+      deleted: await deleteRows(table, options),
+    };
+  } catch (error) {
+    if (isMissingTableError(error)) {
+      return {
+        status: 'skipped',
+        deleted: 0,
+        reason: `Table ${table} does not exist`,
+      };
+    }
+
+    return {
+      status: 'failed',
+      deleted: error.partialDeleted || 0,
+      error: error?.message || String(error),
+    };
+  }
+}
+
+const DELETE_TARGET_LABELS = {
+  memory: 'live buffer',
+  database: 'Supabase',
+};
+
+// Builds the response, writes the SUCCESS / WARN / ERROR audit log entry,
+// and sends: 200 = all good, 207 = partly failed, 502 = everything failed.
+function finishDeletion(
+  req,
+  res,
+  { noun, component, all, requested, results, reportSkipped = false }
+) {
+  const entries = Object.entries(results);
+  const failed = entries.filter(([, r]) => r.status === 'failed');
+  const attempted = entries.filter(([, r]) => r.status !== 'skipped');
+  const everythingFailed =
+    failed.length > 0 && failed.length === attempted.length;
+
+  const scope = all
+    ? `all ${noun}s`
+    : `${requested} ${noun}${requested === 1 ? '' : 's'}`;
+
+  const parts = entries.map(([key, r]) => {
+    const label = DELETE_TARGET_LABELS[key] || key;
+
+    if (r.status === 'ok') return `${label} ${r.deleted}`;
+    if (r.status === 'skipped') return `${label} skipped (${r.reason})`;
+
+    return `${label} FAILED (${r.error})`;
+  });
+
+  const dbResult = results.database;
+
+  if (
+    reportSkipped &&
+    !all &&
+    dbResult?.status === 'ok' &&
+    requested > dbResult.deleted
+  ) {
+    parts.push(`${requested - dbResult.deleted} kept (still running or already gone)`);
+  }
+
+  const message = failed.length
+    ? `Delete finished with errors: ${parts.join(' · ')}`
+    : `Deleted ${scope}: ${parts.join(' · ')}`;
+
+  logger.log(
+    everythingFailed ? 'ERROR' : failed.length ? 'WARN' : 'SUCCESS',
+    component,
+    failed.length
+      ? `Admin delete of ${scope} finished with errors`
+      : `Admin deleted ${scope}`,
+    {
+      requested: all ? 'all' : requested,
+      results,
+      actorIp: req.ip || null,
+    }
+  );
+
+  return res
+    .status(everythingFailed ? 502 : failed.length ? 207 : 200)
+    .json({
+      ok: failed.length === 0,
+      partial: failed.length > 0 && !everythingFailed,
+      message,
+      error: failed.length ? message : undefined,
+      requested: all ? 'all' : requested,
+      results,
+    });
+}
+
+app.post('/api/admin/logs/delete', requireAdmin, async (req, res) => {
+  const all = req.body?.all === true;
+  const ids = all ? null : cleanDeleteIds(req.body?.ids);
+
+  if (!all && !ids.length) {
+    return res.status(400).json({
+      ok: false,
+      error: 'Send ids (array of log ids) or all: true',
+    });
+  }
+
+  if (!all && ids.length > MAX_DELETE_IDS) {
+    return res.status(400).json({
+      ok: false,
+      error: `Select at most ${MAX_DELETE_IDS} logs per request`,
+    });
+  }
+
+  let memory;
+
+  try {
+    memory = {
+      status: 'ok',
+      deleted: all ? logger.clear() : logger.removeByIds(ids),
+    };
+  } catch (error) {
+    memory = {
+      status: 'failed',
+      deleted: 0,
+      error: error?.message || String(error),
+    };
+  }
+
+  const database = await deleteFromDatabase(LOG_TABLE, { ids });
+
+  return finishDeletion(req, res, {
+    noun: 'log',
+    component: 'log-admin',
+    all,
+    requested: all ? null : ids.length,
+    results: { memory, database },
+  });
+});
+
+app.post('/api/admin/sync-runs/delete', requireAdmin, async (req, res) => {
+  if (!supabase) {
+    return res.status(503).json({
+      ok: false,
+      error: 'Supabase not configured',
+    });
+  }
+
+  const all = req.body?.all === true;
+  const ids = all ? null : cleanDeleteIds(req.body?.ids);
+
+  if (!all && !ids.length) {
+    return res.status(400).json({
+      ok: false,
+      error: 'Send ids (array of sync run ids) or all: true',
+    });
+  }
+
+  if (!all && ids.length > MAX_DELETE_IDS) {
+    return res.status(400).json({
+      ok: false,
+      error: `Select at most ${MAX_DELETE_IDS} sync runs per request`,
+    });
+  }
+
+  const database = await deleteFromDatabase('sync_runs', {
+    ids,
+    protectRunning: true,
+  });
+
+  return finishDeletion(req, res, {
+    noun: 'sync run',
+    component: 'sync-admin',
+    all,
+    requested: all ? null : ids.length,
+    results: { database },
+    reportSkipped: true,
+  });
+});
+
 app.post('/api/internal/logs', requireInternalOrAdmin, (req, res) => {
   const events = Array.isArray(req.body?.events)
     ? req.body.events.slice(0, 100)
@@ -1949,10 +2202,9 @@ app.post('/api/internal/logs', requireInternalOrAdmin, (req, res) => {
   res.json({ ok: true, accepted: events.length });
 });
 
-// -----------------------------------------------------------------------------
+// -----------------------------------------------
 // Public catalog endpoints
-// -----------------------------------------------------------------------------
-
+// ------------------------------------------------
 app.get('/api/cards', async (req, res) => {
   if (!supabase) {
     return res.status(503).json({
@@ -2124,7 +2376,6 @@ app.get('/api/admin/catalog', requireAdmin, async (req, res) => {
 // -----------------------------------------------------------------------------
 // 404 handler
 // -----------------------------------------------------------------------------
-
 app.use((req, res) =>
   res.status(404).json({
     ok: false,
@@ -2136,7 +2387,6 @@ app.use((req, res) =>
 // -----------------------------------------------------------------------------
 // Server startup and scheduled tasks
 // -----------------------------------------------------------------------------
-
 const server = app.listen(PORT, () => {
   logger.log(
     'SUCCESS',
@@ -2152,7 +2402,6 @@ const server = app.listen(PORT, () => {
   );
 
   state.nextSourceCheckAt = nextLagosHourIso();
-
   void monitorOnce();
 
   setInterval(
@@ -2249,6 +2498,3 @@ process.on('unhandledRejection', e =>
 );
 
 // end of server.js 
-
-
-// line 2253 
