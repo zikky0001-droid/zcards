@@ -60,8 +60,57 @@
 }
 
 
+/* ===== Delete logs & sync runs: checkboxes, selection bar, confirm dialog ===== */
+:root{--chk-border:#4a526e}
+:root[data-theme="light"]{--chk-border:#aab2c8}
+.chk{appearance:none;-webkit-appearance:none;margin:0;flex:0 0 auto;width:19px;height:19px;border:1.5px solid var(--chk-border);border-radius:6px;background:var(--control-bg);display:inline-grid;place-content:center;cursor:pointer;transition:background .15s,border-color .15s}
+.chk:hover{border-color:var(--accent)}
+.chk:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+.chk:checked,.chk:indeterminate{background:var(--accent);border-color:var(--accent)}
+.chk:checked::after{content:"";width:5px;height:10px;margin-top:-2px;border:solid #110e25;border-width:0 2.2px 2.2px 0;transform:rotate(45deg)}
+.chk:indeterminate::after{content:"";width:9px;height:2.2px;border-radius:2px;background:#110e25}
+.chk:disabled{opacity:.4;cursor:not-allowed}
+:root[data-theme="light"] .chk:checked::after{border-color:#fff}
+:root[data-theme="light"] .chk:indeterminate::after{background:#fff}
+.pick{display:grid;place-items:center;cursor:pointer}
+.select-bar{display:flex;align-items:center;gap:12px;flex-wrap:wrap;padding:10px 12px;margin:0 0 12px;border:1px solid var(--line);border-radius:13px;background:var(--panel2);position:sticky;top:84px;z-index:5}
+.check-all{display:inline-flex;align-items:center;gap:9px;font-size:12px;color:var(--muted);cursor:pointer;user-select:none}
+.sel-actions{margin-left:auto;display:flex;gap:8px;flex-wrap:wrap}
+.btn-delete{background:linear-gradient(135deg,#ff7f98,#e5405f);color:#fff;border-color:transparent;font-weight:800;box-shadow:0 6px 18px #e5405f33}
+.btn-delete:hover{border-color:transparent;box-shadow:0 8px 24px #e5405f55}
+.btn-delete:disabled{box-shadow:none;cursor:not-allowed;opacity:.38;transform:none}
+:root[data-theme="light"] .btn-delete{background:linear-gradient(135deg,#e5546f,#c33254);color:#fff;border-color:transparent}
+:root[data-theme="light"] .danger{color:#c33254;border-color:#edbdc9}
+.log{grid-template-columns:26px 135px 65px 105px minmax(0,1fr)}
+.log.selected{border-color:color-mix(in srgb,var(--red) 55%,#242a3b);background:color-mix(in srgb,var(--red) 9%,#0c101b)}
+:root[data-theme="light"] .log.selected{border-color:color-mix(in srgb,var(--red) 45%,#dce1ee);background:color-mix(in srgb,var(--red) 7%,#f7f8fc)}
+.list-row.selected{background:color-mix(in srgb,var(--red) 8%,transparent)}
+.list-row.selectable{padding-left:8px;padding-right:8px;border-radius:10px}
+.list-row.selectable small{padding-left:29px}
+.line-main{display:flex;align-items:center;gap:10px;min-width:0}
+.line-main strong{overflow-wrap:anywhere}
+.modal-scrim{position:fixed;inset:0;z-index:80;display:grid;place-items:center;padding:16px;background:rgba(4,6,12,.62);backdrop-filter:blur(5px);animation:fade .15s ease}
+:root[data-theme="light"] .modal-scrim{background:rgba(20,25,45,.42)}
+.modal{width:min(440px,100%);padding:22px;animation:pop .18s ease}
+.modal-ico{width:46px;height:46px;border-radius:14px;display:grid;place-items:center;font-size:21px;background:#ff718b1f;border:1px solid #ff718b44;margin-bottom:12px}
+.modal h3{font-size:17px;letter-spacing:-.03em;margin:0 0 6px}
+.modal p{margin:0 0 12px;font-size:13px}
+.modal-targets{list-style:none;margin:0 0 16px;padding:0;display:flex;flex-direction:column;gap:6px}
+.modal-targets li{font-size:12px;color:var(--muted);padding:8px 10px;border:1px solid var(--line);border-radius:10px;background:var(--panel2)}
+.modal-targets li::before{content:"✓ ";color:var(--green)}
+.modal-actions{display:flex;gap:9px;justify-content:flex-end}
+@keyframes pop{from{opacity:0;transform:translateY(8px) scale(.97)}to{opacity:1;transform:none}}
+@media(max-width:760px){
+  .select-bar{top:74px;gap:9px}
+  .sel-actions{margin-left:0;width:100%}
+  .sel-actions button{flex:1}
+  .log{grid-template-columns:26px 1fr 65px}
+  .log .component{grid-column:2/-1}
+  .modal-actions button{flex:1}
+}
+
 </style></head><body>
-<section id="loginView" class="panel login hidden"><div class="brand"><div class="mark"><img class="brand-mark-img" src="./icon.png" alt="Shoob icon" onerror="this.remove();this.parentElement.textContent='S'"></div><div><h1>Shoob Control Room</h1><p>Private scraper operations</p></div></div><p>Unlock the dashboard with the admin key</p><form id="loginForm"><label class="small muted" for="adminKey">Admin key</label><input id="adminKey" class="field" type="password" autocomplete="current-password" required placeholder="Enter admin key" style="margin:7px 0 12px"><button class="primary" style="width:100%">Unlock Control Room</button></form><p id="loginError" class="small" style="color:var(--red)"></p><div class="foot">Keep your admin key private</div></section>
+<section id="loginView" class="panel login hidden"><div class="brand"><div class="mark"><img class="brand-mark-img" src="./icon.png" alt="Shoob icon" onerror="var p=this.parentElement;this.remove();p.textContent='S'"></div><div><h1>Shoob Control Room</h1><p>Private scraper operations</p></div></div><p>Unlock the dashboard with the admin key</p><form id="loginForm"><label class="small muted" for="adminKey">Admin key</label><input id="adminKey" class="field" type="password" autocomplete="current-password" required placeholder="Enter admin key" style="margin:7px 0 12px"><button class="primary" style="width:100%">Unlock Control Room</button></form><p id="loginError" class="small" style="color:var(--red)"></p><div class="foot">Keep your admin key private</div></section>
 <div id="appView" class="shell hidden"><header class="topbar"><div class="brand"><button id="menuBtn" class="hamb" aria-label="Open navigation" aria-expanded="false">☰</button><div class="mark">S</div><div><h1>Shoob Control Room</h1><p>Catalog operations · Incremental sync</p></div></div><div class="top-actions"><span class="connection"><i id="connectionDot" class="dot"></i><span id="connectionText">Connecting…</span></span><button id="themeToggle" class="theme-toggle ghost" type="button" aria-label="Switch to light theme" title="Switch theme"><span class="theme-symbol" id="themeSymbol">☀</span><span class="desktop-label" id="themeLabel">Light mode</span></button><button id="refreshBtn" class="ghost"> 🔁 <span class="desktop-label">Refresh</span></button><button id="logoutBtn">Lock</button></div></header>
 <div class="drawer-scrim" id="drawerScrim"></div><div class="layout"><aside id="sidebar" class="sidebar"><div><div class="nav-label"><strong>🔰 Workspace</strong></div><nav class="nav"><button class="active" data-view="overview"><span class="ico">◈</span>Overview</button><button data-view="catalogs"><span class="ico">▦</span>Catalog Health</button><button data-view="history"><span class="ico">◷</span>Sync History</button><button data-view="logs"><span class="ico">≋</span>System Logs</button><button data-view="diagnostics"><span class="ico">⌁</span>Diagnostics & links</button></nav></div><div class="side-bottom"><div class="mini-health"><strong><i id="sideHealthDot" class="dot"></i> <span id="sideHealthText">Health check pending</span></strong><p id="sideHealthSub">Checking database, storage and active jobs.</p></div><div class="foot"><strong><h3>Built with ♥️ By DEVZIKKY</strong></h3></div></div></aside>
 <main class="content"><div id="banner" class="notice hidden"></div>
@@ -74,10 +123,13 @@
 <div class="section-grid"><article class="panel"><div class="panel-head"><h3>Latest sync activity</h3><button class="ghost small" data-view="history">View history →</button></div><div id="overviewRuns" class="list"><div class="muted small">Loading recent runs…</div></div></article><article class="panel"><div class="panel-head"><h3>Runtime snapshot</h3><span id="runtimePill" class="pill">Live</span></div><div class="health-list"><div class="health-row"><div class="health-icon">⌁</div><div><strong>Uptime</strong><small id="runtime">—</small></div></div><div class="health-row"><div class="health-icon">▤</div><div><strong>Memory</strong><small id="memory">—</small></div></div><div class="health-row"><div class="health-icon">≋</div><div><strong>Log buffer</strong><small id="logCount">— / 5,000</small></div></div></div></article></div>
 </section>
 <section class="view" id="view-catalogs"><div class="page-head"><div><div class="eyebrow">Integrity & freshness</div><h2>Catalog health</h2><p>Published totals versus Supabase. A healthy count match avoids scraping all cards.</p></div><div class="head-actions"><button id="catalogRefreshBtn">Refresh health</button><button class="primary" data-sync="both">Check & repair</button></div></div><div class="section-grid"><article class="panel"><div class="panel-head"><h3>Main card catalogue</h3><span id="mainStorage" class="pill">Storage: —</span></div><div class="metric" id="mainCountDetail">—</div><div id="mainMeta" class="muted small">Checking Supabase count and cards.json</div><div class="divider"></div><div class="health-row"><div class="health-icon">⇄</div><div><strong>Shoob published total</strong><small id="mainSourceDetail">Not checked yet</small></div><span id="mainDeltaDetail" class="state">—</span></div><div class="health-row"><div class="health-icon">＋</div><div><strong>Last repair delta</strong><small id="mainDeltaText">No incremental repair recorded</small></div></div></article><article class="panel"><div class="panel-head"><h3>Event catalogue</h3><span id="eventStorage" class="pill">Storage: —</span></div><div class="metric" id="eventCountDetail">—</div><div id="eventMeta" class="muted small">Checking event_cards and events.json</div><div class="divider"></div><div class="health-row"><div class="health-icon">⇄</div><div><strong>Published event total</strong><small id="eventSourceDetail">Not checked yet</small></div><span id="eventDeltaDetail" class="state">—</span></div><div class="health-row"><div class="health-icon">✦</div><div><strong>Event menu preflight</strong><small id="eventMenuDetail">Waiting for Shoob menu</small></div></div></article></div><article class="panel" style="margin-top:14px"><h3>Safety rules</h3><div class="health-list"><div class="health-row"><div class="health-icon">✓</div><div><strong>Published count first</strong><small>Count match skips card scanning and database writes.</small></div><span class="state good">ON</span></div><div class="health-row"><div class="health-icon">✓</div><div><strong>Append-only repair</strong><small>Missing IDs are added; source count drops never trigger bulk deletion.</small></div><span class="state good">ON</span></div><div class="health-row"><div class="health-icon">✓</div><div><strong>Large-delta stop</strong><small>Unexpectedly large deltas stop before writing.</small></div><span class="state good">ON</span></div><div class="health-row"><div class="health-icon">✓</div><div><strong>Overlap protection</strong><small>Duplicate manual jobs are rejected while a check is active.</small></div><span class="state good">ON</span></div></div></article></section>
-<section class="view" id="view-history"><div class="page-head"><div><div class="eyebrow">Audit trail</div><h2>Sync history</h2><p>Every count check, skipped scan, incremental repair, and failure should leave a record here.</p></div><div class="head-actions"><button id="historyRefreshBtn">Refresh history</button><button class="primary" data-sync="both">Check & repair</button></div></div><article class="panel"><div class="panel-head"><h3>Recent runs</h3><span class="pill">Latest 100</span></div><div id="runs" class="list"><div class="muted small">Loading sync history…</div></div></article></section>
-<section class="view" id="view-logs"><div class="page-head"><div><div class="eyebrow">Runtime events</div><h2>System logs</h2><p>Search failures, warnings, source-count comparisons, and incremental repairs.</p></div><div class="head-actions"><button id="logsRefreshBtn">Refresh logs</button></div></div><article class="panel"><div class="panel-head"><h3>Log stream</h3><span class="pill">Up to 5,000 retained</span></div><div class="log-tools"><input id="searchLogs" class="field" placeholder="Search message or component"><select id="levelFilter" class="field"><option value="ALL">All levels</option><option>ERROR</option><option>WARN</option><option>SUCCESS</option><option>INFO</option><option>SYSTEM</option></select><button id="applyFilter">Filter</button><button id="downloadJson">Export JSON</button><button id="downloadHtml">Export HTML</button></div><div id="logs" class="logs"><div class="muted">Waiting for logs…</div></div></article></section>
+<section class="view" id="view-history"><div class="page-head"><div><div class="eyebrow">Audit trail</div><h2>Sync history</h2><p>Every count check, skipped scan, incremental repair, and failure should leave a record here.</p></div><div class="head-actions"><button id="historyRefreshBtn">Refresh history</button><button class="primary" data-sync="both">Check & repair</button></div></div><article class="panel"><div class="panel-head"><h3>Recent runs</h3><span class="pill">Latest 100</span></div><div class="select-bar"><label class="check-all"><input type="checkbox" class="chk" id="runSelectAll" aria-label="Select all shown sync runs"><span>Select all shown</span></label><span id="runSelCount" class="pill">None selected</span><div class="sel-actions"><button id="runDeleteSel" class="btn-delete" type="button" disabled>🗑 Delete selected</button><button id="runDeleteAll" class="danger" type="button">Delete all</button></div></div>
+<div id="runs" class="list"><div class="muted small">Loading sync history…</div></div></article></section>
+<section class="view" id="view-logs"><div class="page-head"><div><div class="eyebrow">Runtime events</div><h2>System logs</h2><p>Search failures, warnings, source-count comparisons, and incremental repairs.</p></div><div class="head-actions"><button id="logsRefreshBtn">Refresh logs</button></div></div><article class="panel"><div class="panel-head"><h3>Log stream</h3><span class="pill">Up to 5,000 retained</span></div><div class="log-tools"><input id="searchLogs" class="field" placeholder="Search message or component"><select id="levelFilter" class="field"><option value="ALL">All levels</option><option>ERROR</option><option>WARN</option><option>SUCCESS</option><option>INFO</option><option>SYSTEM</option></select><button id="applyFilter">Filter</button><button id="downloadJson">Export JSON</button><button id="downloadHtml">Export HTML</button></div><div class="select-bar"><label class="check-all"><input type="checkbox" class="chk" id="logSelectAll" aria-label="Select all shown logs"><span>Select all shown</span></label><span id="logSelCount" class="pill">None selected</span><div class="sel-actions"><button id="logDeleteSel" class="btn-delete" type="button" disabled>🗑 Delete selected</button><button id="logDeleteAll" class="danger" type="button">Delete all</button></div></div>
+<div id="logs" class="logs"><div class="muted">Waiting for logs…</div></div></article></section>
 <section class="view" id="view-diagnostics"><div class="page-head"><div><div class="eyebrow">Tools & support</div><h2>Diagnostics & links</h2><p>Quick access to the services this project depends on, plus a safe diagnostic export.</p></div><div class="head-actions"><button id="copyDiagBtn2" class="primary">⎘ Copy diagnostics</button></div></div><article class="panel"><div class="panel-head"><h3>Service shortcuts</h3><span class="pill">External links</span></div><div class="link-grid"><a class="action" href="https://shoob.gg" target="_blank" rel="noopener noreferrer"><span class="link-icon">S</span><span><strong>Shoob website ↗</strong><small>Published catalogue and source</small></span></a><a class="action" href="https://shoob.gg/card-events" target="_blank" rel="noopener noreferrer"><span class="link-icon">✦</span><span><strong>Shoob events ↗</strong><small>Verify the live event menu</small></span></a><a class="action" href="https://supabase.com/dashboard" target="_blank" rel="noopener noreferrer"><span class="link-icon">◉</span><span><strong>Supabase ↗</strong><small>Tables, SQL, storage and logs</small></span></a><a class="action" href="https://dashboard.render.com" target="_blank" rel="noopener noreferrer"><span class="link-icon">◒</span><span><strong>Service dashboard ↗</strong><small><h2>Deployments & Logs</h2></small></span></a><a class="action" href="https://github.com" target="_blank" rel="noopener noreferrer"><span class="link-icon">⌘</span><span><strong>GitHub ↗</strong><small>Repository and code changes</small></span></a><a class="action" href="https://status.supabase.com" target="_blank" rel="noopener noreferrer"><span class="link-icon">♥</span><span><strong>Supabase status ↗</strong><small>Check provider incidents</small></span></a></div></article><article class="panel" style="margin-top:14px"><div class="panel-head"><h3>Safe diagnostic snapshot</h3><button id="copyDiagBtn3">Copy snapshot</button></div><p class="muted small">Contains counts, health flags, uptime and job state.</p><pre id="diagPreview">Waiting for status…</pre></article><div class="foot"><strong><h3>The service shortcuts are generic dashboards</strong></h3></div></section>
-<div class="foot"><strong><h3>Shoob Control Room • Hourly source checks scheduled</strong></h3></div></main></div></div><div id="toast" class="toast"></div>
+<div class="foot"><strong><h3>Shoob Control Room • Hourly source checks scheduled</strong></h3></div></main></div></div><div id="confirmScrim" class="modal-scrim hidden"><div class="panel modal" role="dialog" aria-modal="true" aria-labelledby="confirmTitle" aria-describedby="confirmBody"><div class="modal-ico">🗑</div><h3 id="confirmTitle">Delete?</h3><p id="confirmBody" class="muted"></p><ul id="confirmTargets" class="modal-targets"></ul><div class="modal-actions"><button id="confirmCancel" class="ghost" type="button">Cancel</button><button id="confirmOk" class="btn-delete" type="button">Delete</button></div></div></div>
+<div id="toast" class="toast"></div>
 
 <script>
 'use strict';
@@ -177,35 +229,31 @@ function updateStatus(s){lastStatus=s;const connected=!!s.supabaseReachable;$('d
 function safeDiagnostics(s){return {timestamp:new Date().toISOString(),service:'Shoob Control Room',uptimeSeconds:s.uptimeSeconds,supabaseConfigured:s.supabaseConfigured,supabaseReachable:s.supabaseReachable,supabaseError:s.supabaseError,lastMonitorAt:s.lastMonitorAt,lastSourceCheckAt:s.lastSourceCheckAt,nextSourceCheckAt:s.nextSourceCheckAt,sourceCheckTimeZone:s.sourceCheckTimeZone||'Africa/Lagos',sourceCheckSchedule:s.sourceCheckSchedule||'hourly',selfPingIntervalMs:s.selfPingIntervalMs,retentionDays:s.retentionDays,cards:{count:s.cards?.count,sourceTotal:s.cards?.sourceTotal??s.cards?.expected,countsMatch:s.cards?.countsMatch,lastDelta:s.cards?.lastDelta,storage:s.cards?.storage,isScraping:s.cards?.isScraping,error:s.cards?.error},events:{count:s.events?.count,sourceTotal:s.events?.sourceTotal??s.events?.expected,countsMatch:s.events?.countsMatch,lastDelta:s.events?.lastDelta,storage:s.events?.storage,isScraping:s.events?.isScraping,menuChecked:s.events?.menuChecked,menuError:s.events?.menuError,unknownEvents:s.events?.unknownEvents,error:s.events?.error},memory:s.memory,logBuffer:s.logBuffer}}
 async function refreshStatus(){const s=await api('/api/admin/status');updateStatus(s)}
 
-// --- UPDATED REFRESH LOGS FUNCTION (Option 2: Preserves <details> open state) ---
+// --- REFRESH LOGS (keeps <details> open state and the delete selection across refreshes) ---
 async function refreshLogs(){
     const p=new URLSearchParams({limit:'250',level:$('levelFilter').value,search:$('searchLogs').value});
     const d=await api('/api/admin/logs?'+p);
     if(!d.logs.length){
         $('logs').innerHTML='<div class="muted small">No logs match this filter.</div>';
+        logSel.sync();
         return;
     }
-    
-    // 1. Save the 'open' state of existing details elements before we wipe them
-    const openStates = [];
-    document.querySelectorAll('#logs details').forEach((details, index) => {
-        openStates[index] = details.open;
-    });
 
-    // 2. Render the new HTML (this destroys the old elements)
-    $('logs').innerHTML = d.logs.map(l => `<article class="log"><time>${esc(new Date(l.timestamp).toLocaleString())}</time><span class="level ${esc(l.level)}">${esc(l.level)}</span><span class="component">${esc(l.component)}</span><div class="message">${esc(l.message)}${l.details && Object.keys(l.details).length ? `<details><summary class="muted small">Details</summary><pre>${esc(JSON.stringify(l.details, null, 2))}</pre></details>` : ''}</div></article>`).join('');
+    // Remember which <details> are open, keyed by log id (new entries no longer shift the state)
+    const openIds=new Set();
+    document.querySelectorAll('#logs .log[data-id] details[open]').forEach(el=>openIds.add(el.closest('.log').dataset.id));
 
-    // 3. Restore the 'open' state to the newly created details elements
-    document.querySelectorAll('#logs details').forEach((details, index) => {
-        if (openStates[index]) {
-            details.open = true;
-        }
+    $('logs').innerHTML = d.logs.map(l => `<article class="log" data-id="${esc(l.id)}">${l.id?`<label class="pick"><input type="checkbox" class="chk log-pick" data-id="${esc(l.id)}" aria-label="Select this log"></label>`:'<span></span>'}<time>${esc(new Date(l.timestamp).toLocaleString())}</time><span class="level ${esc(l.level)}">${esc(l.level)}</span><span class="component">${esc(l.component)}</span><div class="message">${esc(l.message)}${l.details && Object.keys(l.details).length ? `<details><summary class="muted small">Details</summary><pre>${esc(JSON.stringify(l.details, null, 2))}</pre></details>` : ''}</div></article>`).join('');
+
+    document.querySelectorAll('#logs .log[data-id]').forEach(a=>{
+        if(openIds.has(a.dataset.id)) a.querySelector('details')?.setAttribute('open','');
     });
+    logSel.sync();
 }
 // --------------------------------------------------------------------------------
 
-function runMarkup(r){const kind=r.status==='success'?'SUCCESS':r.status==='failed'?'ERROR':r.status==='warning'?'WARN':'INFO';const meta=r.metadata||{};const mode=meta.mode?` · ${meta.mode}`:'';const added=r.records_added!=null?` · ${fmt(r.records_added)} added`:'';return `<div class="list-row"><div class="line"><strong>${esc(r.catalog||'catalog')} · ${esc(r.trigger||'run')}</strong><span class="level ${kind}">${esc(r.status||'unknown')}</span></div><small>${esc(r.started_at?new Date(r.started_at).toLocaleString():'—')} · ${fmt(r.records_found)} source records${added}${esc(mode)}${r.error?' · '+esc(r.error):''}</small></div>`}
-async function refreshRuns(){try{const d=await api('/api/admin/sync-runs');const html=d.runs.length?d.runs.slice(0,100).map(runMarkup).join(''):'<div class="muted small">No sync runs recorded yet.</div>';$('runs').innerHTML=html;$('overviewRuns').innerHTML=d.runs.length?d.runs.slice(0,4).map(runMarkup).join(''):'<div class="muted small">No sync runs recorded yet.</div>'}catch(e){$('runs').textContent=e.message}}
+function runMarkup(r,selectable){const kind=r.status==='success'?'SUCCESS':r.status==='failed'?'ERROR':r.status==='warning'?'WARN':'INFO';const meta=r.metadata||{};const mode=meta.mode?` · ${meta.mode}`:'';const added=r.records_added!=null?` · ${fmt(r.records_added)} added`:'';const running=String(r.status||'').toLowerCase()==='running';const pick=selectable&&r.id!=null?`<label class="pick"><input type="checkbox" class="chk run-pick" data-id="${esc(r.id)}" aria-label="Select sync run"${running?' disabled title="Still running — can’t be deleted yet"':''}></label>`:'';return `<div class="list-row${pick?' selectable':''}"><div class="line"><span class="line-main">${pick}<strong>${esc(r.catalog||'catalog')} · ${esc(r.trigger||'run')}</strong></span><span class="level ${kind}">${esc(r.status||'unknown')}</span></div><small>${esc(r.started_at?new Date(r.started_at).toLocaleString():'—')} · ${fmt(r.records_found)} source records${added}${esc(mode)}${r.error?' · '+esc(r.error):''}</small></div>`}
+async function refreshRuns(){try{const d=await api('/api/admin/sync-runs');const html=d.runs.length?d.runs.slice(0,100).map(r=>runMarkup(r,true)).join(''):'<div class="muted small">No sync runs recorded yet.</div>';$('runs').innerHTML=html;runSel.sync();$('overviewRuns').innerHTML=d.runs.length?d.runs.slice(0,4).map(r=>runMarkup(r)).join(''):'<div class="muted small">No sync runs recorded yet.</div>'}catch(e){$('runs').textContent=e.message;runSel.sync()}}
 async function refreshAll(){if(!adminKey||refreshBusy)return;refreshBusy=true;try{await refreshStatus();await Promise.allSettled([refreshRuns(),document.querySelector('#view-logs').classList.contains('active')?refreshLogs():Promise.resolve()])}catch(e){if(/401|authentication/i.test(e.message)){adminKey='';sessionStorage.removeItem('shoob-admin-key');showLogin()}else{toast(e.message,'bad')}}finally{refreshBusy=false}}
 async function runSync(target,button){if(button)button.disabled=true;try{const d=await api('/api/admin/sync',{method:'POST',body:JSON.stringify({catalog:target})});toast(d.message||'Incremental check started');await refreshAll()}catch(e){toast(e.message,'bad')}finally{if(button)button.disabled=false}}
 document.querySelectorAll('[data-sync]').forEach(b=>b.addEventListener('click',()=>runSync(b.dataset.sync,b)));
@@ -213,7 +261,96 @@ $('refreshBtn').onclick=refreshAll;$('catalogRefreshBtn').onclick=refreshAll;$('
 for(const fmt of ['Json','Html'])$('download'+fmt).onclick=async()=>{try{const p=new URLSearchParams({format:fmt.toLowerCase(),level:$('levelFilter').value,search:$('searchLogs').value});const r=await fetch('/api/admin/logs/download?'+p,{headers:{'x-admin-key':adminKey}});if(!r.ok)throw new Error('Log export failed');const blob=await r.blob();const u=URL.createObjectURL(blob);const a=document.createElement('a');a.href=u;a.download=`shoob-logs.${fmt.toLowerCase()}`;a.click();setTimeout(()=>URL.revokeObjectURL(u),1000);toast('Log export ready')}catch(e){toast(e.message,'bad')}};
 async function copyDiagnostics(){try{const snapshot=JSON.stringify(safeDiagnostics(lastStatus||{}),null,2);if(navigator.clipboard&&window.isSecureContext)await navigator.clipboard.writeText(snapshot);else{const ta=document.createElement('textarea');ta.value=snapshot;ta.style.position='fixed';ta.style.opacity='0';document.body.appendChild(ta);ta.select();const ok=document.execCommand('copy');ta.remove();if(!ok)throw new Error('Clipboard is unavailable; copy the snapshot from the Diagnostics view')}toast('Safe diagnostics copied')}catch(e){toast(e.message,'bad')}}
 ['copyDiagBtn','copyDiagBtn2','copyDiagBtn3'].forEach(id=>$(id).onclick=copyDiagnostics);
-if(adminKey){showApp();refreshAll()}else showLogin();setInterval(()=>{if(adminKey)refreshAll()},5000);window.addEventListener('keydown',e=>{if(e.key==='Escape')openDrawer(false)});
+// ===== Deleting logs & sync runs =====
+let deleteBusy=false,confirmResolve=null,confirmFocus=null;
+function confirmDialog({title,body,items=[],okLabel='Delete'}){
+  return new Promise(resolve=>{
+    confirmResolve=resolve;confirmFocus=document.activeElement;
+    $('confirmTitle').textContent=title;$('confirmBody').textContent=body;
+    $('confirmTargets').innerHTML=items.map(t=>`<li>${esc(t)}</li>`).join('');
+    $('confirmOk').textContent=okLabel;
+    $('confirmScrim').classList.remove('hidden');
+    $('confirmCancel').focus();
+  });
+}
+function closeConfirm(value){
+  if(!confirmResolve)return;
+  $('confirmScrim').classList.add('hidden');
+  const done=confirmResolve;confirmResolve=null;done(value);
+  if(confirmFocus&&confirmFocus.focus)confirmFocus.focus();
+}
+$('confirmOk').onclick=()=>closeConfirm(true);
+$('confirmCancel').onclick=()=>closeConfirm(false);
+$('confirmScrim').addEventListener('click',e=>{if(e.target===$('confirmScrim'))closeConfirm(false)});
+
+function createSelector(cfg){
+  const set=new Set(),listEl=$(cfg.listId);
+  const boxes=()=>[...listEl.querySelectorAll(cfg.pick)].filter(b=>!b.disabled);
+  const mark=(b,on)=>{const row=b.closest(cfg.row);if(row)row.classList.toggle('selected',on)};
+  function ui(list=boxes()){
+    const n=set.size,all=$(cfg.all);
+    $(cfg.count).textContent=n?n+' selected':'None selected';
+    $(cfg.delSel).disabled=n===0||deleteBusy;
+    $(cfg.delAll).disabled=deleteBusy;
+    all.disabled=!list.length;
+    all.checked=list.length>0&&list.every(b=>set.has(b.dataset.id));
+    all.indeterminate=n>0&&!all.checked;
+  }
+  function sync(){
+    const list=boxes(),present=new Set(list.map(b=>b.dataset.id));
+    for(const id of [...set])if(!present.has(id))set.delete(id);
+    list.forEach(b=>{b.checked=set.has(b.dataset.id);mark(b,b.checked)});
+    ui(list);
+  }
+  listEl.addEventListener('change',e=>{
+    const b=e.target;if(!b.matches||!b.matches(cfg.pick))return;
+    b.checked?set.add(b.dataset.id):set.delete(b.dataset.id);
+    mark(b,b.checked);ui();
+  });
+  $(cfg.all).addEventListener('change',()=>{
+    const on=$(cfg.all).checked;
+    boxes().forEach(b=>{b.checked=on;on?set.add(b.dataset.id):set.delete(b.dataset.id);mark(b,on)});
+    ui();
+  });
+  return{set,sync,ui};
+}
+const logSel=createSelector({listId:'logs',pick:'.log-pick',row:'.log',all:'logSelectAll',count:'logSelCount',delSel:'logDeleteSel',delAll:'logDeleteAll'});
+const runSel=createSelector({listId:'runs',pick:'.run-pick',row:'.list-row',all:'runSelectAll',count:'runSelCount',delSel:'runDeleteSel',delAll:'runDeleteAll'});
+
+async function runDelete(o){
+  if(deleteBusy)return;
+  const ids=[...o.sel.set];
+  if(!o.all&&!ids.length)return;
+  const ok=await confirmDialog({
+    title:o.all?`Delete all ${o.noun}s?`:`Delete ${ids.length} ${o.noun}${ids.length===1?'':'s'}?`,
+    body:o.all?o.allBody:o.body,
+    items:o.items,
+    okLabel:o.all?'Delete everything':`Delete ${ids.length}`
+  });
+  if(!ok)return;
+  const btn=o.all?o.allBtn:o.selBtn,label=btn.textContent;
+  deleteBusy=true;btn.textContent='Deleting…';o.sel.ui();
+  try{
+    const d=await api(o.endpoint,{method:'POST',body:JSON.stringify(o.all?{all:true}:{ids})});
+    o.sel.set.clear();
+    toast(d.message||'Deleted',d.ok===false?'bad':'good');
+  }catch(e){toast(e.message,'bad')}
+  finally{
+    deleteBusy=false;btn.textContent=label;
+    await Promise.allSettled([refreshStatus(),o.refresh()]);
+    o.sel.sync();
+  }
+}
+const LOG_TARGETS=['Live log buffer on this server','Supabase · system_logs table (if available)'];
+const RUN_TARGETS=['Supabase · sync_runs table'];
+const logDel={sel:logSel,noun:'log',endpoint:'/api/admin/logs/delete',selBtn:$('logDeleteSel'),allBtn:$('logDeleteAll'),refresh:refreshLogs,items:LOG_TARGETS,body:'These logs will be permanently removed. This can’t be undone.',allBody:'This clears the whole log buffer and every row in system_logs, not just the logs shown. One audit entry will record the deletion.'};
+const runDel={sel:runSel,noun:'sync run',endpoint:'/api/admin/sync-runs/delete',selBtn:$('runDeleteSel'),allBtn:$('runDeleteAll'),refresh:refreshRuns,items:RUN_TARGETS,body:'These sync runs will be permanently removed from the history. Runs still in progress are kept.',allBody:'This removes every sync run from the history table, not just the 100 shown. Runs still in progress are kept.'};
+$('logDeleteSel').onclick=()=>runDelete({...logDel,all:false});
+$('logDeleteAll').onclick=()=>runDelete({...logDel,all:true});
+$('runDeleteSel').onclick=()=>runDelete({...runDel,all:false});
+$('runDeleteAll').onclick=()=>runDelete({...runDel,all:true});
+
+if(adminKey){showApp();refreshAll()}else showLogin();setInterval(()=>{if(adminKey)refreshAll()},5000);window.addEventListener('keydown',e=>{if(e.key==='Escape'){closeConfirm(false);openDrawer(false)}if(e.key==='Tab'&&confirmResolve){const f=[$('confirmCancel'),$('confirmOk')],i=f.indexOf(document.activeElement);e.preventDefault();f[(i+(e.shiftKey?-1:1)+2)%2].focus()}});
 </script>
 </body>
 </html>
