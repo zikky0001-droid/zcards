@@ -480,12 +480,43 @@ app.get('/api/status', (req, res) => res.json({
   retentionDays: 7,
   retentionCleanupIntervalMs: RETENTION_CLEANUP_MS,
 }));
+
 app.post('/api/admin/login', (req, res) => {
-  if (!process.env.ADMIN_KEY) return res.status(503).json({ ok: false, error: 'ADMIN_KEY is not configured on Render' });
-  if (!safeEqual(String(req.body?.key || ''), process.env.ADMIN_KEY)) { logger.log('WARN', 'security', 'Failed admin login attempt', { ip: req.ip }); return res.status(401).json({ ok: false, error: 'Invalid admin key' }); }
-  logger.log('SUCCESS', 'security', 'Admin login accepted', { ip: req.ip });
-  res.json({ ok: true, message: 'Authenticated for this browser session. Keep the key private.' });
+  if (!process.env.ADMIN_KEY) {
+    return res.status(503).json({
+      ok: false,
+      error: 'ADMIN_KEY is not configured on Render'
+    });
+  }
+
+  if (!safeEqual(
+    String(req.body?.key || ''),
+    process.env.ADMIN_KEY
+  )) {
+    logger.log('WARN', 'security', 'Failed admin login attempt', {
+      ip: req.ip,
+      remoteAddress: req.socket.remoteAddress,
+      forwardedFor: req.get('x-forwarded-for') || null,
+    });
+
+    return res.status(401).json({
+      ok: false,
+      error: 'Invalid admin key'
+    });
+  }
+
+  logger.log('SUCCESS', 'security', 'Admin login accepted', {
+    ip: req.ip,
+    remoteAddress: req.socket.remoteAddress,
+    forwardedFor: req.get('x-forwarded-for') || null,
+  });
+
+  res.json({
+    ok: true,
+    message: 'Authenticated for this browser session. Keep the key private.'
+  });
 });
+
 
 app.get('/api/admin/status', requireAdmin, (req, res) => {
   res.json({
