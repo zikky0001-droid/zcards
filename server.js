@@ -1686,6 +1686,7 @@ app.get('/api/status', (req, res) =>
   })
 );
 
+// line 1689 
 // -----------------------------------------------------------------------------
 // Admin login: updated IP diagnostics
 // -----------------------------------------------------------------------------
@@ -1739,7 +1740,7 @@ app.get('/api/admin/status', requireAdmin, (req, res) => {
   res.json({
     ok: true,
     ...state,
-    uptimeSeconds: Math.floor(process.uptime(),
+    uptimeSeconds: Math.floor(process.uptime()),
 
     memory: {
       rssMb: +(
@@ -1759,6 +1760,7 @@ app.get('/api/admin/status', requireAdmin, (req, res) => {
     },
   });
 });
+
 
 app.get('/api/admin/logs', requireAdmin, (req, res) =>
   res.json({
@@ -2249,3 +2251,4 @@ process.on('unhandledRejection', e =>
 // end of server.js 
 
 
+// line 2253 
