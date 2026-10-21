@@ -10,6 +10,7 @@ const { ShoobEventScraper, groupCardsByEvent } = require('./events.js');
 const logger = require('./logger.js');
 
 const app = express();
+app.set('trust proxy', 1);
 const PORT = Number(process.env.PORT || 3000);
 const MONITOR_MS = 10_000;
 const SCHEDULER_POLL_MS = 10_000;
@@ -485,7 +486,23 @@ app.post('/api/admin/login', (req, res) => {
   logger.log('SUCCESS', 'security', 'Admin login accepted', { ip: req.ip });
   res.json({ ok: true, message: 'Authenticated for this browser session. Keep the key private.' });
 });
-app.get('/api/admin/status', requireAdmin, (req, res) => res.json({ ok: true, ...state, logBuffer: { max: logger.MAX_LOGS, current: logger.list({ limit: logger.MAX_LOGS }).length } }));
+
+app.get('/api/admin/status', requireAdmin, (req, res) => {
+  res.json({
+    ok: true,
+    ...state,
+    uptimeSeconds: Math.floor(process.uptime()),
+    memory: {
+      rssMb: +(process.memoryUsage().rss / 1048576).toFixed(1),
+      heapMb: +(process.memoryUsage().heapUsed / 1048576).toFixed(1),
+    },
+    logBuffer: {
+      max: logger.MAX_LOGS,
+      current: logger.list({ limit: logger.MAX_LOGS }).length,
+    },
+  });
+});
+
 app.get('/api/admin/logs', requireAdmin, (req, res) => res.json({ ok: true, max: logger.MAX_LOGS, logs: logger.list({ limit: req.query.limit, level: req.query.level, search: req.query.search }) }));
 app.get('/api/admin/logs/download', requireAdmin, (req, res) => {
   const format = ['json','txt','html'].includes(String(req.query.format)) ? String(req.query.format) : 'json';
@@ -575,4 +592,5 @@ process.on('unhandledRejection', e => logger.log('ERROR','process','Unhandled re
 
 
 // end of server.js 
+
 
