@@ -222,7 +222,9 @@ function applyCardFilters(query, filters) {
     query = query.ilike('series', `%${filters.series}%`);
   }
   if (filters.search) {
-    query = query.or(`name.ilike.%${filters.search}%,series.ilike.%${filters.search}%`);
+    // Escape any literal % characters the user might have typed to prevent PostgREST syntax errors
+    const safeSearch = filters.search.replace(/%/g, '\\%');
+    query = query.or(`name.ilike.%${safeSearch}%,series.ilike.%${safeSearch}%`);
   }
   return query;
 }
@@ -537,7 +539,7 @@ async function scrapeMainAndSync(trigger) {
   state.cards.lastDelta = 0;
   state.lastSourceCheckAt = new Date().toISOString();
 
-  logger.log('INFO', 'scraper-main', 'Checking Shoob published total before any card scan', { trigger });
+  logger.log('INFO', 'scraper-main', 'Checking ZCard published total before any card scan', { trigger });
 
   try {
     const dbCount = await countRows('cards');
@@ -569,7 +571,7 @@ async function scrapeMainAndSync(trigger) {
       state.cards.expected = summary.total;
 
       if (!missing.length) {
-        const note = `Shoob total ${summary.total} differs from Supabase ${dbCount}, but no missing IDs were found. No records were deleted.`;
+        const note = `ZCard total ${summary.total} differs from Supabase ${dbCount}, but no missing IDs were found. No records were deleted.`;
         logger.log('WARN', 'scraper-main', note, { sourceTotal: summary.total, databaseCount: dbCount, trigger });
         await recordNoopRun('cards', trigger, summary.total, dbCount, { mode: 'count-mismatch-no-missing-ids', warning: note });
         await supabase.from('catalog_state').update({
@@ -602,7 +604,7 @@ async function scrapeEventsAndSync(trigger) {
   state.events.lastDelta = 0;
   state.lastSourceCheckAt = new Date().toISOString();
 
-  logger.log('INFO', 'scraper-events', 'Checking Shoob event menu and per-event totals before scanning cards', { trigger });
+  logger.log('INFO', 'scraper-events', 'Checking ZCard event menu and per-event totals before scanning cards', { trigger });
 
   try {
     const summaryScraper = new ShoobEventScraper();
@@ -667,7 +669,7 @@ async function scrapeEventsAndSync(trigger) {
     state.events.finishedAt = new Date().toISOString();
   } catch (e) {
     state.events.error = e.message || String(e);
-    const unknownMatch = state.events.error.match(/New Shoob event\(s\) need to be added before syncing: (.+)$/);
+    const unknownMatch = state.events.error.match(/New ZCard event\(s\) need to be added before syncing: (.+)$/);
     if (unknownMatch) {
       state.events.menuChecked = true;
       state.events.unknownEvents = unknownMatch[1].split(',').map(x => x.trim()).filter(Boolean);
@@ -835,7 +837,7 @@ async function selfPingOnce() {
     state.selfPing.lastAttemptAt = new Date().toISOString();
 
     try {
-      const response = await fetch(url, { method: 'GET', signal: controller.signal, headers: { 'user-agent': 'Shoob-Control-Room-self-ping' } });
+      const response = await fetch(url, { method: 'GET', signal: controller.signal, headers: { 'user-agent': 'ZCard-Control-Room-self-ping' } });
       if (!response.ok) throw new Error(`Self-ping returned HTTP ${response.status}`);
 
       const wasFailing = !!state.selfPing.lastError;
@@ -873,7 +875,7 @@ async function schedulerTick() {
     state.scheduler.lastCheckStatus = 'running';
     state.scheduler.lastCheckError = null;
 
-    logger.log('INFO', 'scheduler', 'Hourly Shoob cards and events check started', { slot, timeZone: LAGOS_TIME_ZONE });
+    logger.log('INFO', 'scheduler', 'Hourly ZCard cards and events check started', { slot, timeZone: LAGOS_TIME_ZONE });
 
     try {
       await sourceCheck(`scheduled-hourly-${slot}`);
@@ -885,7 +887,7 @@ async function schedulerTick() {
       state.scheduler.lastCheckError = null;
       state.scheduler.retryAt = null;
 
-      logger.log('SUCCESS', 'scheduler', 'Hourly Shoob cards and events check completed', { slot, timeZone: LAGOS_TIME_ZONE });
+      logger.log('SUCCESS', 'scheduler', 'Hourly ZCard cards and events check completed', { slot, timeZone: LAGOS_TIME_ZONE });
     } catch (error) {
       state.scheduler.lastCheckStatus = 'failed';
       state.scheduler.lastCheckError = error?.message || String(error);
@@ -928,7 +930,7 @@ app.get(['/api/health', '/ping'], (req, res) => {
 
   res.status(healthy ? 200 : 503).json({
     ok: healthy,
-    service: 'Shoob Control Room',
+    service: 'ZCard Control Room',
     supabaseConfigured,
     supabaseReachable: state.supabaseReachable,
     activeJobs: { cards: state.cards.isScraping, events: state.events.isScraping },
@@ -1011,9 +1013,9 @@ app.get('/api/admin/logs/download', requireAdmin, (req, res) => {
     const esc = s => String(s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
     body =
       `<!doctype html><meta charset="utf-8">` +
-      `<title>Shoob Logs</title>` +
+      `<title>ZCard Logs</title>` +
       `<style>body{font:14px system-ui;background:#0b1020;color:#e8edff;padding:24px}article{padding:12px;margin:8px 0;border:1px solid #29334e;border-radius:10px}small{color:#9ba8c7}pre{white-space:pre-wrap;overflow-wrap:anywhere}</style>` +
-      `<h1>Shoob system logs (${logs.length})</h1>` +
+      `<h1>ZCard system logs (${logs.length})</h1>` +
       logs.map(x => `<article><small>${esc(x.timestamp)} · ${esc(x.level)} · ${esc(x.component)}</small><p>${esc(x.message)}</p><pre>${esc(JSON.stringify(x.details, null, 2))}</pre></article>`).join('');
   } else {
     type = 'application/json; charset=utf-8';
@@ -1021,7 +1023,7 @@ app.get('/api/admin/logs/download', requireAdmin, (req, res) => {
   }
 
   res.setHeader('Content-Type', type);
-  res.setHeader('Content-Disposition', `attachment; filename="shoob-logs-${new Date().toISOString().slice(0, 10)}.${format}"`);
+  res.setHeader('Content-Disposition', `attachment; filename="zcard-logs-${new Date().toISOString().slice(0, 10)}.${format}"`);
   res.send(body);
 });
 
@@ -1226,8 +1228,18 @@ app.get('/api/cards', async (req, res) => {
 
     return res.json(response);
   } catch (error) {
-    logger.log('ERROR', 'api-cards', 'Card endpoint failed', { error: error?.message || String(error) });
-    return res.status(502).json({ ok: false, error: 'Catalog query failed' });
+    const errMsg = error?.message || String(error);
+    const errDetails = error?.details || error?.hint || 'No additional details provided by database.';
+    console.error(`[API CARDS ERROR] ${errMsg}`, errDetails);
+    logger.log('ERROR', 'api-cards', 'Card endpoint failed', { 
+      error: errMsg,
+      details: errDetails 
+    });
+    return res.status(502).json({ 
+      ok: false, 
+      error: 'Catalog query failed',
+      details: errDetails 
+    });
   }
 });
 
@@ -1290,8 +1302,18 @@ app.get('/api/events', async (req, res) => {
 
     return res.json(response);
   } catch (error) {
-    logger.log('ERROR', 'api-events', 'Event endpoint failed', { error: error?.message || String(error) });
-    return res.status(502).json({ ok: false, error: 'Event query failed' });
+    const errMsg = error?.message || String(error);
+    const errDetails = error?.details || error?.hint || 'No additional details provided by database.';
+    console.error(`[API EVENTS ERROR] ${errMsg}`, errDetails);
+    logger.log('ERROR', 'api-events', 'Event endpoint failed', { 
+      error: errMsg,
+      details: errDetails 
+    });
+    return res.status(502).json({ 
+      ok: false, 
+      error: 'Event query failed',
+      details: errDetails 
+    });
   }
 });
 
@@ -1320,7 +1342,7 @@ app.get('/api/admin/catalog', requireAdmin, async (req, res) => {
 
 const PUBLIC_ENDPOINT_DIRECTORY = {
   ok: true,
-  service: 'Shoob Control Room',
+  service: 'ZCard Control Room',
   documentation: {
     queryRules: [
       'Use ? before the first query parameter.',
@@ -1455,7 +1477,7 @@ app.use((req, res) => res.status(404).json({ ok: false, error: 'Endpoint not fou
 // Server startup and scheduled tasks
 // -----------------------------------------------------------------------------
 const server = app.listen(PORT, () => {
-  logger.log('SUCCESS', 'startup', 'Shoob scraper service listening', {
+  logger.log('SUCCESS', 'startup', 'ZCard scraper service listening', {
     port: PORT,
     node: process.version,
     supabaseConfigured,
@@ -1489,4 +1511,6 @@ process.on('uncaughtException', e => logger.log('ERROR', 'process', 'Uncaught ex
 process.on('unhandledRejection', e => logger.log('ERROR', 'process', 'Unhandled rejection', { error: e?.message || String(e) }));
 
 // end of server.js
+
+
 
