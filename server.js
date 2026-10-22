@@ -244,8 +244,8 @@ async function countFilteredValues(table, column, applyFilters, fallbackLabel = 
   if (countError) throw countError;
 
   // 2. Smart threshold: avoid fetching massive datasets for breakdowns
-  if (count > 5000) {
-    return { breakdown_omitted: 'Dataset exceeds 5,000 records. Apply filters (e.g., tier, series, or event) to see the breakdown.' };
+  if (count > 50000) {
+    return { breakdown_omitted: 'Dataset exceeds 50,000 records. Apply filters (e.g., tier, series, or event) to see the breakdown.' };
   }
 
   // 3. Batch fetch for accurate breakdown
