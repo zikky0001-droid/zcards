@@ -210,7 +210,7 @@ function getSearchFilters(req) {
   return {
     tier: req.query.tier ? String(req.query.tier).trim().slice(0, 30) : '',
     series: cleanSearchTerm(req.query.series || req.query.anime, 100),
-    search: cleanSearchTerm(req.query.search || req.query.q, 80),
+    search: cleanSearchTerm(req.query.search || req.query.q, 80), // Handles both 'search' and 'q'
   };
 }
 
@@ -239,6 +239,21 @@ function applySort(query, rawSort, rawOrder, allowedColumns) {
 }
 
 async function getUniqueCounts(table, column, applyFilters, includeBreakdown) {
+  // 1. Get exact count first to avoid "Requested range not satisfiable" on empty results
+  const { count, error: countError } = await applyFilters(
+    supabase.from(table).select(column, { count: 'exact', head: true })
+  );
+  if (countError) throw countError;
+
+  // 2. If 0 matches, return immediately. This is correct data, not an error!
+  if (count === 0) {
+    return {
+      uniqueCount: 0,
+      breakdown: includeBreakdown ? {} : null
+    };
+  }
+
+  // 3. Only fetch ranges if there is actual data
   const batchSize = 1000;
   const uniqueSet = new Set();
   const breakdown = includeBreakdown ? Object.create(null) : null;
@@ -1511,6 +1526,5 @@ process.on('uncaughtException', e => logger.log('ERROR', 'process', 'Uncaught ex
 process.on('unhandledRejection', e => logger.log('ERROR', 'process', 'Unhandled rejection', { error: e?.message || String(e) }));
 
 // end of server.js
-
 
 
