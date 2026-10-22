@@ -142,13 +142,131 @@
   .modal-actions button{flex:1}
 }
 
-</style></head><body>
+/* ... All your existing CSS, media queries, and layout rules ... */
+
+@media(max-width:390px){
+  .grid{grid-template-columns:1fr 1fr}
+  .metric{font-size:22px}
+  /* ... rest of your mobile CSS ... */
+}
+
+/* =========================================
+   4K ROTATING GLOW EFFECT FOR BRAND MARK
+   ========================================= */
+
+:root {
+  --g1: #00f2ff; /* Neon Cyan */
+  --g2: #ff0055; /* Neon Pink */
+  /* ... etc ... */
+}
+
+/* ... rest of the new 4K glow code ... */
+
+@keyframes spin-mark {
+  0% { transform: rotate(0deg); }
+  100% { transform: rotate(360deg); }
+}
+
+.brand-mark-img {
+  position: relative;
+  z-index: 2;
+  border-radius: 10px;
+}
+
+/* =========================================
+   4K ROTATING GLOW EFFECT FOR BRAND MARK
+   ========================================= */
+
+/* 1. Define the 5 Dark Theme Colors (Neon/Vibrant) */
+:root {
+  --g1: #00f2ff; /* Neon Cyan */
+  --g2: #ff0055; /* Neon Pink */
+  --g3: #bd00ff; /* Electric Purple */
+  --g4: #00ff88; /* Neon Green */
+  --g5: #ffaa00; /* Bright Orange */
+}
+
+/* 2. Define the 5 Light Theme Colors (Deep/Vibrant) */
+[data-theme="light"] {
+  --g1: #0055ff; /* Royal Blue */
+  --g2: #ff0077; /* Vivid Magenta */
+  --g3: #7700ff; /* Deep Violet */
+  --g4: #00aa44; /* Emerald Green */
+  --g5: #ff5500; /* Sunset Orange */
+}
+
+/* 3. The Core Card */
+.mark {
+  position: relative;
+  width: 34px;
+  height: 34px;
+  border-radius: 12px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-weight: 800;
+  font-size: 18px;
+  color: #fff; /* Keeps the "D" text bright */
+  background: var(--bg-surface, #090b12); /* Matches header bg to hide gradient center */
+  z-index: 1;
+  overflow: visible; /* Allows the glow to bleed out */
+  /* Remove old static box-shadow if you have one, so it doesn't clash */
+  box-shadow: none !important; 
+}
+
+/* Light theme text adjustment for the "D" */
+[data-theme="light"] .mark {
+  color: #ffffff; 
+  background: #ffffff; /* Solid white core for light mode */
+}
+
+/* 4. The Spinning Border (Middle Layer) */
+.mark::before {
+  content: '';
+  position: absolute;
+  inset: -2px; /* 2px thickness for the border */
+  border-radius: 14px;
+  background: conic-gradient(from 0deg, var(--g1), var(--g2), var(--g3), var(--g4), var(--g5), var(--g1));
+  z-index: -1;
+  animation: spin-mark 1.5s linear infinite;
+}
+
+/* 5. The 4K Glow (Bottom Layer) */
+.mark::after {
+  content: '';
+  position: absolute;
+  inset: -4px;
+  border-radius: 16px;
+  background: conic-gradient(from 0deg, var(--g1), var(--g2), var(--g3), var(--g4), var(--g5), var(--g1));
+  z-index: -2;
+  filter: blur(8px); /* The magic 4K blur */
+  opacity: 0.7;
+  animation: spin-mark 1.5s linear infinite;
+}
+
+/* 6. The Animation */
+@keyframes spin-mark {
+  0% { transform: rotate(0deg); }
+  100% { transform: rotate(360deg); }
+}
+
+/* Ensure the image inside sits on top of the spinning border */
+.brand-mark-img {
+  position: relative;
+  z-index: 2;
+  border-radius: 10px; /* Slightly smaller than parent to let border peek */ 
+}
+
+</style>
+</head>
+<body>
+
 <section id="loginView" class="panel login hidden"><div class="brand"><div class="mark"><img class="brand-mark-img" src="./icon.png" alt="ZCard icon" onerror="var p=this.parentElement;this.remove();p.textContent='D'"></div><div><h1>ZCard Control Room</h1><p>Private scraper operator</p></div></div><p><strong>Unlock the dashboard with the admin key</strong></p><form id="loginForm"><label class="small muted" for="adminKey">🔐 Admin key</label><input id="adminKey" class="field" type="password" autocomplete="current-password" required placeholder="Enter the admin key" style="margin:7px 0 12px"><button class="primary" style="width:100%">🔰 Unlock Control Room 🔰</button></form><p id="loginError" class="small" style="color:var(--red)"></p><div class="foot">Keep your admin key private</div></section>
 <div id="appView" class="shell hidden"><header class="topbar"><div class="brand"><button id="menuBtn" class="hamb" aria-label="Open navigation" aria-expanded="false">☰</button><div class="mark">D</div><div><h1>ZCard Control Room</h1><p>Catalog operations · Incremental sync</p></div></div><div class="top-actions"><span class="connection"><i id="connectionDot" class="dot"></i><span id="connectionText">Connecting…</span></span><button id="themeToggle" class="theme-toggle ghost" type="button" aria-label="Switch to light theme" title="Switch theme"><span class="theme-symbol" id="themeSymbol">☀</span><span class="desktop-label" id="themeLabel">Light mode</span></button><button id="refreshBtn" class="ghost"> 🔁 <span class="desktop-label">Refresh</span></button><button id="logoutBtn">Lock</button></div></header>
 <div class="drawer-scrim" id="drawerScrim"></div><div class="layout"><aside id="sidebar" class="sidebar"><div><div class="nav-label"><strong>🔰 Workspace</strong></div><nav class="nav"><button class="active" data-view="overview"><span class="ico">◈</span>Overview</button><button data-view="catalogs"><span class="ico">▦</span>Catalog Health</button><button data-view="history"><span class="ico">◷</span>Sync History</button><button data-view="logs"><span class="ico">≋</span>System Logs</button><button data-view="diagnostics"><span class="ico">⌁</span>Diagnostics & links</button></nav></div><div class="side-bottom"><div class="mini-health"><strong><i id="sideHealthDot" class="dot"></i> <span id="sideHealthText">Health check pending</span></strong><p id="sideHealthSub">Checking database, storage and active jobs.</p></div><div class="foot"><strong><h3>Built with ♥️ By DEVZIKKY</strong></h3></div></div></aside>
 <main class="content"><div id="banner" class="notice hidden"></div>
 
-<section class="view active" id="view-overview"><div class="page-head"><div><div class="eyebrow">Live operations</div><h1>Good to see you.</h1><p>One glance at ZCard, Database, and the statistics.</p></div><div class="head-actions"><button id="checkSourceBtn" class="primary">↻ Check & repair</button></div></div>
+<section class="view active" id="view-overview"><div class="page-head"><div><div class="eyebrow">Live operations</div><h1>Good to see you...</h1><p>One glance at ZCard, Database, and the statistics.</p></div><div class="head-actions"><button id="checkSourceBtn" class="primary">↻ Check & repair</button></div></div>
 <div class="grid"><article class="panel metric-panel"><span class="metric-icon">◉</span><div class="metric-label">Database</div><div id="dbStatus" class="metric">Checking</div><div id="dbSub" class="submetric">Waiting for health probe...</div></article><article class="panel metric-panel"><span class="metric-icon">▦</span><div class="metric-label">Main cards</div><div id="mainCount" class="metric">—</div><div id="mainCompare" class="submetric">Shoob total: checking</div><div class="progress"><span id="mainBar"></span></div></article><article class="panel metric-panel"><span class="metric-icon">✦</span><div class="metric-label">Event cards</div><div id="eventCount" class="metric">—</div><div id="eventCompare" class="submetric">Per-event check: pending</div><div class="progress"><span id="eventBar"></span></div></article><article class="panel metric-panel"><span class="metric-icon">◷</span><div class="metric-label">Last source check</div><div id="lastCheckMetric" class="metric" style="font-size:21px">—</div><div id="nextCheckMetric" class="submetric">⚡ Auto-check every hour</div></article></div>
 <div class="section-grid"><article class="panel"><div class="panel-head"><h3>System health</h3><span id="healthBadge" class="pill">Running checks…</span></div><div class="health-list"><div class="health-row"><div class="health-icon">◉</div><div><strong>Supabase connection</strong><small id="healthDbText">Waiting for probe</small></div><span id="healthDbState" class="state">—</span></div><div class="health-row"><div class="health-icon">▦</div><div><strong>Main catalogue</strong><small id="healthMainText">Count and storage status</small></div><span id="healthMainState" class="state">—</span></div><div class="health-row"><div class="health-icon">✦</div><div><strong>Event catalogue</strong><small id="healthEventText">Per-event count validation</small></div><span id="healthEventState" class="state">—</span></div><div class="health-row"><div class="health-icon">⛨</div><div><strong>Safeguards</strong><small id="healthGuardText">No-overlap checks and no-delete policy</small></div><span id="healthGuardState" class="state good">ACTIVE</span></div></div></article>
 <article class="panel"><div class="panel-head"><h3>Quick actions</h3><span class="pill">Incremental</span></div><div class="actions-grid"><button class="action-card" data-sync="cards"><span class="bigico">▦</span><strong>Check main cards</strong><small>Compare count, add missing only</small></button><button class="action-card" data-sync="events"><span class="bigico">✦</span><strong>Check events</strong><small>Validate each event separately</small></button><button class="action-card" data-sync="both"><span class="bigico">↻</span><strong>Check Both</strong><small>Run both guarded checks</small></button><button id="copyDiagBtn" class="action-card"><span class="bigico">⎘</span><strong>Copy Diagnostics</strong><small>Copy Health Summary</small></button></div><div class="divider"></div><div class="small muted">No automatic deletions. Count mismatch triggers a missing-ID scan; matching counts skip the scan entirely.</div></article></div>
