@@ -236,21 +236,10 @@ function applySort(query, rawSort, rawOrder, allowedColumns) {
   return query.order(sort, { ascending }).order('id', { ascending: true });
 }
 
-async function countFilteredValues(table, column, applyFilters, fallbackLabel = 'Unknown') {
-  // 1. Get exact count of filtered records first
-  const { count, error: countError } = await applyFilters(
-    supabase.from(table).select(column, { count: 'exact', head: true })
-  );
-  if (countError) throw countError;
-
-  // 2. Smart threshold: avoid fetching massive datasets for breakdowns
-  if (count > 50000) {
-    return { breakdown_omitted: 'Dataset exceeds 50,000 records. Apply filters (e.g., tier, series, or event) to see the breakdown.' };
-  }
-
-  // 3. Batch fetch for accurate breakdown
-  const counts = Object.create(null);
+async function getUniqueCounts(table, column, applyFilters, includeBreakdown) {
   const batchSize = 1000;
+  const uniqueSet = new Set();
+  const breakdown = includeBreakdown ? Object.create(null) : null;
 
   for (let start = 0; ; start += batchSize) {
     let query = supabase.from(table).select(column);
@@ -260,12 +249,19 @@ async function countFilteredValues(table, column, applyFilters, fallbackLabel = 
     
     const rows = data || [];
     for (const row of rows) {
-      const value = String(row[column] || fallbackLabel);
-      counts[value] = (counts[value] || 0) + 1;
+      const value = String(row[column] || 'Unknown');
+      uniqueSet.add(value);
+      if (includeBreakdown) {
+        breakdown[value] = (breakdown[value] || 0) + 1;
+      }
     }
     if (rows.length < batchSize) break;
   }
-  return counts;
+  
+  return {
+    uniqueCount: uniqueSet.size,
+    breakdown
+  };
 }
 
 // ============================================================================
@@ -1184,6 +1180,7 @@ app.get('/api/cards', async (req, res) => {
   const limit = Math.min(100, parsePositiveInt(req.query.limit, 20));
   const page = parsePositiveInt(req.query.page, 1);
   const filters = getSearchFilters(req);
+  const includeBreakdown = req.query.byseries === 'true' || req.query.byseries === '1';
 
   const buildFilteredQuery = query => applyCardFilters(query, filters);
   const startTime = Date.now();
@@ -1192,9 +1189,9 @@ app.get('/api/cards', async (req, res) => {
     const cardsQuery = buildFilteredQuery(supabase.from('cards').select('*', { count: 'exact' }));
     const sortedQuery = applySort(cardsQuery, req.query.sort, req.query.order, ['name', 'tier', 'series']);
 
-    const [result, bySeries] = await Promise.all([
+    const [result, uniqueData] = await Promise.all([
       sortedQuery.range((page - 1) * limit, page * limit - 1),
-      countFilteredValues('cards', 'series', buildFilteredQuery)
+      getUniqueCounts('cards', 'series', buildFilteredQuery, includeBreakdown)
     ]);
 
     if (result.error) {
@@ -1204,10 +1201,10 @@ app.get('/api/cards', async (req, res) => {
 
     const count = result.count || 0;
 
-    return res.json({
+    const response = {
       ok: true,
       count,
-      bySeries,
+      series_count: uniqueData.uniqueCount,
       page,
       limit,
       pages: Math.ceil(count / limit),
@@ -1221,7 +1218,13 @@ app.get('/api/cards', async (req, res) => {
       durationMs: Date.now() - startTime,
       timestamps: getTimestamps(),
       data: result.data || [],
-    });
+    };
+
+    if (includeBreakdown) {
+      response.bySeries = uniqueData.breakdown;
+    }
+
+    return res.json(response);
   } catch (error) {
     logger.log('ERROR', 'api-cards', 'Card endpoint failed', { error: error?.message || String(error) });
     return res.status(502).json({ ok: false, error: 'Catalog query failed' });
@@ -1235,6 +1238,7 @@ app.get('/api/events', async (req, res) => {
   const page = parsePositiveInt(req.query.page, 1);
   const filters = getSearchFilters(req);
   const eventSlug = req.query.event ? String(req.query.event).trim().slice(0, 80) : '';
+  const includeBreakdown = req.query.byevent === 'true' || req.query.byevent === '1' || req.query.byseries === 'true' || req.query.byseries === '1';
 
   const buildFilteredQuery = query => {
     query = applyCardFilters(query, filters);
@@ -1248,9 +1252,9 @@ app.get('/api/events', async (req, res) => {
     const eventsQuery = buildFilteredQuery(supabase.from('event_cards').select('*', { count: 'exact' }));
     const sortedQuery = applySort(eventsQuery, req.query.sort, req.query.order, ['name', 'tier', 'series', 'event_slug']);
 
-    const [result, byEvent] = await Promise.all([
+    const [result, uniqueData] = await Promise.all([
       sortedQuery.range((page - 1) * limit, page * limit - 1),
-      countFilteredValues('event_cards', 'event_slug', buildFilteredQuery)
+      getUniqueCounts('event_cards', 'event_slug', buildFilteredQuery, includeBreakdown)
     ]);
 
     if (result.error) {
@@ -1260,10 +1264,10 @@ app.get('/api/events', async (req, res) => {
 
     const count = result.count || 0;
 
-    return res.json({
+    const response = {
       ok: true,
       count,
-      byEvent,
+      event_count: uniqueData.uniqueCount,
       page,
       limit,
       pages: Math.ceil(count / limit),
@@ -1278,7 +1282,13 @@ app.get('/api/events', async (req, res) => {
       durationMs: Date.now() - startTime,
       timestamps: getTimestamps(),
       data: result.data || [],
-    });
+    };
+
+    if (includeBreakdown) {
+      response.byEvent = uniqueData.breakdown;
+    }
+
+    return res.json(response);
   } catch (error) {
     logger.log('ERROR', 'api-events', 'Event endpoint failed', { error: error?.message || String(error) });
     return res.status(502).json({ ok: false, error: 'Event query failed' });
@@ -1325,7 +1335,9 @@ const PUBLIC_ENDPOINT_DIRECTORY = {
       'tier is an exact tier filter.',
       'sort must be an allowed column for that endpoint.',
       'order accepts asc or desc (default asc).',
-      'Sorting includes a stable secondary sort by id to prevent page shifting.'
+      'Sorting includes a stable secondary sort by id to prevent page shifting.',
+      'series_count and event_count return the total number of unique matches.',
+      'Add &byseries=true or &byevent=true to include the full 1-by-1 breakdown dictionary.'
     ],
   },
   endpoints: [
@@ -1368,6 +1380,7 @@ const PUBLIC_ENDPOINT_DIRECTORY = {
         anime: 'Alias for series.',
         sort: 'name, tier, or series.',
         order: 'asc or desc; default asc.',
+        byseries: 'Set to true to include the full 1-by-1 series breakdown dictionary.',
       },
       examples: [
         '/api/cards?limit=50',
@@ -1378,7 +1391,8 @@ const PUBLIC_ENDPOINT_DIRECTORY = {
         '/api/cards?anime=naruto&tier=S&limit=50',
         '/api/cards?series=one%20piece&sort=tier&order=desc',
         '/api/cards?search=uta&page=2&limit=25',
-        '/api/cards?tier=S&search=naruto&sort=name&order=asc&page=3&limit=25'
+        '/api/cards?tier=S&search=naruto&sort=name&order=asc&page=3&limit=25',
+        '/api/cards?tier=S&byseries=true'
       ],
     },
     {
@@ -1396,6 +1410,7 @@ const PUBLIC_ENDPOINT_DIRECTORY = {
         anime: 'Alias for series.',
         sort: 'name, tier, series, or event_slug.',
         order: 'asc or desc; default asc.',
+        byevent: 'Set to true to include the full 1-by-1 event breakdown dictionary.',
       },
       examples: [
         '/api/events?event=summer&limit=50',
@@ -1405,7 +1420,8 @@ const PUBLIC_ENDPOINT_DIRECTORY = {
         '/api/events?event=summer&anime=one%20piece&limit=50',
         '/api/events?tier=S&search=goku&page=1&limit=25',
         '/api/events?event=gala&sort=tier&order=desc',
-        '/api/events?event=christmas&tier=S&series=naruto&sort=name&order=asc&page=2&limit=10'
+        '/api/events?event=christmas&tier=S&series=naruto&sort=name&order=asc&page=2&limit=10',
+        '/api/events?event=summer&byevent=true'
       ],
     },
     {
@@ -1472,6 +1488,5 @@ process.once('SIGINT', () => shutdown('SIGINT'));
 process.on('uncaughtException', e => logger.log('ERROR', 'process', 'Uncaught exception', { error: e?.message || String(e) }));
 process.on('unhandledRejection', e => logger.log('ERROR', 'process', 'Unhandled rejection', { error: e?.message || String(e) }));
 
-// end of server.js  
-
+// end of server.js
 
