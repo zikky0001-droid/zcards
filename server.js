@@ -210,7 +210,7 @@ function getSearchFilters(req) {
   return {
     tier: req.query.tier ? String(req.query.tier).trim().slice(0, 30) : '',
     series: cleanSearchTerm(req.query.series || req.query.anime, 100),
-    search: cleanSearchTerm(req.query.search || req.query.q, 80), // Handles both 'search' and 'q'
+    search: cleanSearchTerm(req.query.search || req.query.q, 80), // 'search' and 'q' are aliases
   };
 }
 
@@ -222,7 +222,7 @@ function applyCardFilters(query, filters) {
     query = query.ilike('series', `%${filters.series}%`);
   }
   if (filters.search) {
-    // Escape any literal % characters the user might have typed to prevent PostgREST syntax errors
+    // Escape literal % characters to prevent PostgREST syntax errors
     const safeSearch = filters.search.replace(/%/g, '\\%');
     query = query.or(`name.ilike.%${safeSearch}%,series.ilike.%${safeSearch}%`);
   }
@@ -233,19 +233,19 @@ function applySort(query, rawSort, rawOrder, allowedColumns) {
   const sort = allowedColumns.includes(String(rawSort)) ? String(rawSort) : 'name';
   const order = String(rawOrder || 'asc').toLowerCase();
   const ascending = order !== 'desc';
-  
-  // Primary sort, then secondary stable sort by 'id' to prevent page shifting
+
+  // Primary sort + stable secondary sort by id to prevent page shifting
   return query.order(sort, { ascending }).order('id', { ascending: true });
 }
 
 async function getUniqueCounts(table, column, applyFilters, includeBreakdown) {
-  // 1. Get exact count first to avoid "Requested range not satisfiable" on empty results
+  // Exact filtered count first (head query, no rows transferred)
   const { count, error: countError } = await applyFilters(
     supabase.from(table).select(column, { count: 'exact', head: true })
   );
   if (countError) throw countError;
 
-  // 2. If 0 matches, return immediately. This is correct data, not an error!
+  // Zero matches: correct data, not an error. Never call .range() on empty sets.
   if (count === 0) {
     return {
       uniqueCount: 0,
@@ -253,7 +253,6 @@ async function getUniqueCounts(table, column, applyFilters, includeBreakdown) {
     };
   }
 
-  // 3. Only fetch ranges if there is actual data
   const batchSize = 1000;
   const uniqueSet = new Set();
   const breakdown = includeBreakdown ? Object.create(null) : null;
@@ -263,7 +262,7 @@ async function getUniqueCounts(table, column, applyFilters, includeBreakdown) {
     query = applyFilters(query);
     const { data, error } = await query.range(start, start + batchSize - 1);
     if (error) throw error;
-    
+
     const rows = data || [];
     for (const row of rows) {
       const value = String(row[column] || 'Unknown');
@@ -274,7 +273,7 @@ async function getUniqueCounts(table, column, applyFilters, includeBreakdown) {
     }
     if (rows.length < batchSize) break;
   }
-  
+
   return {
     uniqueCount: uniqueSet.size,
     breakdown
@@ -684,7 +683,8 @@ async function scrapeEventsAndSync(trigger) {
     state.events.finishedAt = new Date().toISOString();
   } catch (e) {
     state.events.error = e.message || String(e);
-    const unknownMatch = state.events.error.match(/New ZCard event\(s\) need to be added before syncing: (.+)$/);
+    // Matches the scraper module's message regardless of brand wording
+    const unknownMatch = state.events.error.match(/New (?:Shoob|ZCard) event\(s\) need to be added before syncing: (.+)$/);
     if (unknownMatch) {
       state.events.menuChecked = true;
       state.events.unknownEvents = unknownMatch[1].split(',').map(x => x.trim()).filter(Boolean);
@@ -1055,7 +1055,7 @@ app.post('/api/admin/sync', requireAdmin, async (req, res) => {
   if ((target === 'cards' || target === 'both') && state.cards.isScraping) return res.status(409).json({ ok: false, error: 'Main-card check is already running. Refresh status instead of starting another.' });
   if ((target === 'events' || target === 'both') && state.events.isScraping) return res.status(409).json({ ok: false, error: 'Event check is already running. Refresh status instead of starting another.' });
   if (!supabase) return res.status(503).json({ ok: false, error: 'Supabase is not configured; sync was not started.' });
-  
+
   if (target === 'cards' || target === 'both') void scrapeMainAndSync('manual-admin');
   if (target === 'events' || target === 'both') void scrapeEventsAndSync('manual-admin');
 
@@ -1188,7 +1188,7 @@ app.post('/api/internal/logs', requireInternalOrAdmin, (req, res) => {
 });
 
 // -----------------------------------------------
-// Public catalog endpoints
+// Public catalog endpoints (SAFE-RANGE PAGINATION)
 // -----------------------------------------------
 
 app.get('/api/cards', async (req, res) => {
@@ -1202,59 +1202,85 @@ app.get('/api/cards', async (req, res) => {
   const buildFilteredQuery = query => applyCardFilters(query, filters);
   const startTime = Date.now();
 
+  const filtersEcho = {
+    tier: filters.tier || null,
+    series: filters.series || null,
+    search: filters.search || null,
+    sort: ['name', 'tier', 'series'].includes(String(req.query.sort)) ? String(req.query.sort) : 'name',
+    order: String(req.query.order).toLowerCase() === 'desc' ? 'desc' : 'asc',
+  };
+
   try {
-    const cardsQuery = buildFilteredQuery(supabase.from('cards').select('*', { count: 'exact' }));
-    const sortedQuery = applySort(cardsQuery, req.query.sort, req.query.order, ['name', 'tier', 'series']);
+    // 1) Exact filtered count first (head query, no rows transferred)
+    const { count, error: countErr } = await buildFilteredQuery(
+      supabase.from('cards').select('id', { count: 'exact', head: true })
+    );
+    if (countErr) throw countErr;
 
-    const [result, uniqueData] = await Promise.all([
-      sortedQuery.range((page - 1) * limit, page * limit - 1),
-      getUniqueCounts('cards', 'series', buildFilteredQuery, includeBreakdown)
-    ]);
+    const safeCount = count || 0;
+    const pages = Math.ceil(safeCount / limit);
+    const safeStart = (page - 1) * limit;
 
-    if (result.error) {
-      logger.log('ERROR', 'api-cards', 'Card query failed', { error: result.error.message });
-      return res.status(502).json({ ok: false, error: 'Catalog query failed' });
+    // 2) Requested page lies beyond the data → graceful empty page, never a range error
+    if (safeCount === 0 || safeStart >= safeCount) {
+      const uniqueData = safeCount === 0
+        ? { uniqueCount: 0, breakdown: includeBreakdown ? {} : null }
+        : await getUniqueCounts('cards', 'series', buildFilteredQuery, includeBreakdown);
+
+      const emptyResponse = {
+        ok: true,
+        count: safeCount,
+        series_count: uniqueData.uniqueCount,
+        page,
+        limit,
+        pages,
+        filters: filtersEcho,
+        durationMs: Date.now() - startTime,
+        timestamps: getTimestamps(),
+        data: [],
+      };
+      if (includeBreakdown) emptyResponse.bySeries = uniqueData.breakdown;
+      return res.json(emptyResponse);
     }
 
-    const count = result.count || 0;
+    // 3) Clamp the range so it can never exceed the last existing row
+    const safeEnd = Math.min(page * limit - 1, safeCount - 1);
+
+    const sortedQuery = applySort(
+      buildFilteredQuery(supabase.from('cards').select('*')),
+      req.query.sort,
+      req.query.order,
+      ['name', 'tier', 'series']
+    );
+
+    const [result, uniqueData] = await Promise.all([
+      sortedQuery.range(safeStart, safeEnd),
+      getUniqueCounts('cards', 'series', buildFilteredQuery, includeBreakdown),
+    ]);
+
+    if (result.error) throw result.error;
 
     const response = {
       ok: true,
-      count,
+      count: safeCount,
       series_count: uniqueData.uniqueCount,
       page,
       limit,
-      pages: Math.ceil(count / limit),
-      filters: {
-        tier: filters.tier || null,
-        series: filters.series || null,
-        search: filters.search || null,
-        sort: ['name', 'tier', 'series'].includes(String(req.query.sort)) ? String(req.query.sort) : 'name',
-        order: String(req.query.order).toLowerCase() === 'desc' ? 'desc' : 'asc',
-      },
+      pages,
+      filters: filtersEcho,
       durationMs: Date.now() - startTime,
       timestamps: getTimestamps(),
       data: result.data || [],
     };
 
-    if (includeBreakdown) {
-      response.bySeries = uniqueData.breakdown;
-    }
-
+    if (includeBreakdown) response.bySeries = uniqueData.breakdown;
     return res.json(response);
   } catch (error) {
     const errMsg = error?.message || String(error);
     const errDetails = error?.details || error?.hint || 'No additional details provided by database.';
     console.error(`[API CARDS ERROR] ${errMsg}`, errDetails);
-    logger.log('ERROR', 'api-cards', 'Card endpoint failed', { 
-      error: errMsg,
-      details: errDetails 
-    });
-    return res.status(502).json({ 
-      ok: false, 
-      error: 'Catalog query failed',
-      details: errDetails 
-    });
+    logger.log('ERROR', 'api-cards', 'Card endpoint failed', { error: errMsg, details: errDetails });
+    return res.status(502).json({ ok: false, error: 'Catalog query failed', details: errDetails });
   }
 });
 
@@ -1275,60 +1301,86 @@ app.get('/api/events', async (req, res) => {
 
   const startTime = Date.now();
 
+  const filtersEcho = {
+    event: eventSlug || null,
+    tier: filters.tier || null,
+    series: filters.series || null,
+    search: filters.search || null,
+    sort: ['name', 'tier', 'series', 'event_slug'].includes(String(req.query.sort)) ? String(req.query.sort) : 'name',
+    order: String(req.query.order).toLowerCase() === 'desc' ? 'desc' : 'asc',
+  };
+
   try {
-    const eventsQuery = buildFilteredQuery(supabase.from('event_cards').select('*', { count: 'exact' }));
-    const sortedQuery = applySort(eventsQuery, req.query.sort, req.query.order, ['name', 'tier', 'series', 'event_slug']);
+    // 1) Exact filtered count first (head query, no rows transferred)
+    const { count, error: countErr } = await buildFilteredQuery(
+      supabase.from('event_cards').select('id', { count: 'exact', head: true })
+    );
+    if (countErr) throw countErr;
 
-    const [result, uniqueData] = await Promise.all([
-      sortedQuery.range((page - 1) * limit, page * limit - 1),
-      getUniqueCounts('event_cards', 'event_slug', buildFilteredQuery, includeBreakdown)
-    ]);
+    const safeCount = count || 0;
+    const pages = Math.ceil(safeCount / limit);
+    const safeStart = (page - 1) * limit;
 
-    if (result.error) {
-      logger.log('ERROR', 'api-events', 'Event query failed', { error: result.error.message });
-      return res.status(502).json({ ok: false, error: 'Event query failed' });
+    // 2) Requested page lies beyond the data → graceful empty page, never a range error
+    if (safeCount === 0 || safeStart >= safeCount) {
+      const uniqueData = safeCount === 0
+        ? { uniqueCount: 0, breakdown: includeBreakdown ? {} : null }
+        : await getUniqueCounts('event_cards', 'event_slug', buildFilteredQuery, includeBreakdown);
+
+      const emptyResponse = {
+        ok: true,
+        count: safeCount,
+        event_count: uniqueData.uniqueCount,
+        page,
+        limit,
+        pages,
+        filters: filtersEcho,
+        durationMs: Date.now() - startTime,
+        timestamps: getTimestamps(),
+        data: [],
+      };
+      if (includeBreakdown) emptyResponse.byEvent = uniqueData.breakdown;
+      return res.json(emptyResponse);
     }
 
-    const count = result.count || 0;
+    // 3) Clamp the range so it can never exceed the last existing row
+    const safeEnd = Math.min(page * limit - 1, safeCount - 1);
+
+    const sortedQuery = applySort(
+      buildFilteredQuery(supabase.from('event_cards').select('*')),
+      req.query.sort,
+      req.query.order,
+      ['name', 'tier', 'series', 'event_slug']
+    );
+
+    const [result, uniqueData] = await Promise.all([
+      sortedQuery.range(safeStart, safeEnd),
+      getUniqueCounts('event_cards', 'event_slug', buildFilteredQuery, includeBreakdown),
+    ]);
+
+    if (result.error) throw result.error;
 
     const response = {
       ok: true,
-      count,
+      count: safeCount,
       event_count: uniqueData.uniqueCount,
       page,
       limit,
-      pages: Math.ceil(count / limit),
-      filters: {
-        event: eventSlug || null,
-        tier: filters.tier || null,
-        series: filters.series || null,
-        search: filters.search || null,
-        sort: ['name', 'tier', 'series', 'event_slug'].includes(String(req.query.sort)) ? String(req.query.sort) : 'name',
-        order: String(req.query.order).toLowerCase() === 'desc' ? 'desc' : 'asc',
-      },
+      pages,
+      filters: filtersEcho,
       durationMs: Date.now() - startTime,
       timestamps: getTimestamps(),
       data: result.data || [],
     };
 
-    if (includeBreakdown) {
-      response.byEvent = uniqueData.breakdown;
-    }
-
+    if (includeBreakdown) response.byEvent = uniqueData.breakdown;
     return res.json(response);
   } catch (error) {
     const errMsg = error?.message || String(error);
     const errDetails = error?.details || error?.hint || 'No additional details provided by database.';
     console.error(`[API EVENTS ERROR] ${errMsg}`, errDetails);
-    logger.log('ERROR', 'api-events', 'Event endpoint failed', { 
-      error: errMsg,
-      details: errDetails 
-    });
-    return res.status(502).json({ 
-      ok: false, 
-      error: 'Event query failed',
-      details: errDetails 
-    });
+    logger.log('ERROR', 'api-events', 'Event endpoint failed', { error: errMsg, details: errDetails });
+    return res.status(502).json({ ok: false, error: 'Event query failed', details: errDetails });
   }
 });
 
@@ -1374,7 +1426,8 @@ const PUBLIC_ENDPOINT_DIRECTORY = {
       'order accepts asc or desc (default asc).',
       'Sorting includes a stable secondary sort by id to prevent page shifting.',
       'series_count and event_count return the total number of unique matches.',
-      'Add &byseries=true or &byevent=true to include the full 1-by-1 breakdown dictionary.'
+      'Add &byseries=true or &byevent=true to include the full 1-by-1 breakdown dictionary.',
+      'Requesting a page beyond the last page returns ok:true with an empty data array, not an error.'
     ],
   },
   endpoints: [
@@ -1526,5 +1579,6 @@ process.on('uncaughtException', e => logger.log('ERROR', 'process', 'Uncaught ex
 process.on('unhandledRejection', e => logger.log('ERROR', 'process', 'Unhandled rejection', { error: e?.message || String(e) }));
 
 // end of server.js
+
 
 
