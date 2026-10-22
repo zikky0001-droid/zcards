@@ -2219,7 +2219,7 @@ function cleanSearchTerm(value, maxLength = 80) {
   return String(value)
     .trim()
     // Remove PostgREST .or() syntax and SQL LIKE wildcards from user input.
-    .replace(/[,%()_*\\]/g, '')
+    .replace(/[\",%'.:;()_*\\]/g, '')
     .replace(/[\u0000-\u001f\u007f]/g, '')
     .slice(0, maxLength)
     .trim();
@@ -2251,7 +2251,7 @@ function applySort(query, rawSort, rawOrder, allowedColumns) {
 // Counts every matching row in batches so breakdowns aren't limited to the
 // current page or silently truncated by the default Supabase row limit.
 async function countFilteredValues(table, column, applyFilters, fallbackLabel = 'Unknown') {
-  const counts = {};
+  const counts = Object.create(null);
   const batchSize = 1000;
 
   for (let start = 0; ; start += batchSize) {
@@ -2293,14 +2293,26 @@ app.get('/api/cards', async (req, res) => {
     const cardsQuery = buildFilteredQuery(supabase.from('cards').select('*', { count: 'exact' }));
     const sortedQuery = applySort(cardsQuery, requestedSort, requestedOrder, ['name', 'tier', 'series']);
 
-    const [result, bySeries] = await Promise.all([
+    const [resultOutcome, seriesOutcome] = await Promise.allSettled([
       sortedQuery.range((page - 1) * limit, page * limit - 1),
       countFilteredValues('cards', 'series', buildFilteredQuery),
     ]);
 
+    if (resultOutcome.status === 'rejected') throw resultOutcome.reason;
+    const result = resultOutcome.value;
+
     if (result.error) {
       logger.log('ERROR', 'api-cards', 'Card query failed', { error: result.error.message });
       return res.status(502).json({ ok: false, error: 'Catalog query failed' });
+    }
+
+    let bySeries = {};
+    if (seriesOutcome.status === 'fulfilled') {
+      bySeries = seriesOutcome.value;
+    } else {
+      logger.log('WARN', 'api-cards', 'Series breakdown failed; returning cards without breakdown counts', {
+        error: seriesOutcome.reason?.message || String(seriesOutcome.reason),
+      });
     }
 
     const count = result.count || 0;
@@ -2354,14 +2366,26 @@ app.get('/api/events', async (req, res) => {
     const eventsQuery = buildFilteredQuery(supabase.from('event_cards').select('*', { count: 'exact' }));
     const sortedQuery = applySort(eventsQuery, requestedSort, requestedOrder, allowedSorts);
 
-    const [result, byEvent] = await Promise.all([
+    const [resultOutcome, eventOutcome] = await Promise.allSettled([
       sortedQuery.range((page - 1) * limit, page * limit - 1),
       countFilteredValues('event_cards', 'event_slug', buildFilteredQuery),
     ]);
 
+    if (resultOutcome.status === 'rejected') throw resultOutcome.reason;
+    const result = resultOutcome.value;
+
     if (result.error) {
       logger.log('ERROR', 'api-events', 'Event query failed', { error: result.error.message });
       return res.status(502).json({ ok: false, error: 'Event query failed' });
+    }
+
+    let byEvent = {};
+    if (eventOutcome.status === 'fulfilled') {
+      byEvent = eventOutcome.value;
+    } else {
+      logger.log('WARN', 'api-events', 'Event breakdown failed; returning event cards without breakdown counts', {
+        error: eventOutcome.reason?.message || String(eventOutcome.reason),
+      });
     }
 
     const count = result.count || 0;
