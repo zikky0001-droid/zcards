@@ -22,12 +22,13 @@ const ROUTE_PARAMS = {
   '/api/stats':     { keys: ['daily', 'weekly', 'monthly', 'endpoint', 'method', 'from', 'to',
                               'success', 'failed', 'top'],
                       enumVals: ['method'] },
+  '/api/stats/recent': { keys: ['limit'], enumVals: [] },
   '/api/status':    { keys: [], enumVals: [] },
   '/api/endpoints': { keys: [], enumVals: [] },
   '/api/endpoint':  { keys: [], enumVals: [] },
 };
 
-const SKIP_PATHS = new Set(['/api/health', '/ping', '/api/stats', '/api/stats/recent', '/api/endpoints', '/api/endpoint']);
+const SKIP_PATHS = new Set(['/api/health', '/ping']);
 const MAX_PENDING_BUCKETS = 2000;
 const FLUSH_MS = 60_000;
 const PRUNE_MS = 6 * 60 * 60 * 1000; // 6 hours
@@ -67,6 +68,45 @@ function buildParamSig(query, routeInfo) {
   return parts.join(',');
 }
 
+// ---------- Stored-data safety helpers ----------
+
+// Never store or return credential-like query parameters. Historical rows may
+// contain a URL accidentally stored as a path by an older deployment, so scrub
+// those too before returning analytics to clients.
+const SENSITIVE_QUERY_KEYS = new Set([
+  'key', 'api_key', 'apikey', 'token', 'access_token', 'refresh_token',
+  'authorization', 'auth', 'secret', 'password', 'client_secret',
+]);
+
+function safePath(value) {
+  const raw = String(value || '');
+  const sensitiveSuffix = /[?&](?:key|api_key|apikey|token|access_token|refresh_token|authorization|auth|secret|password|client_secret)=/i;
+  const match = sensitiveSuffix.exec(raw);
+  if (match) return raw.slice(0, match.index);
+  return raw.split('?', 1)[0];
+}
+
+function safeParamSig(value) {
+  return String(value || '')
+    .split(',')
+    .filter(Boolean)
+    .filter(part => {
+      const key = part.split('=', 1)[0].trim().toLowerCase();
+      return key && !SENSITIVE_QUERY_KEYS.has(key);
+    })
+    .join(',');
+}
+
+function sanitizeStatsRow(row) {
+  return { ...row, path: safePath(row.path), param_sig: safeParamSig(row.param_sig) };
+}
+
+function isExcludedAnalyticsPath(path) {
+  return path === '/api/health' || path === '/ping' ||
+    path === '/api/admin' || path.startsWith('/api/admin/') ||
+    path === '/api/internal' || path.startsWith('/api/internal/');
+}
+
 // ---------- Main factory ----------
 
 function createStatsTracker({ getSupabase, logger }) {
@@ -98,6 +138,9 @@ function createStatsTracker({ getSupabase, logger }) {
   function middleware(req, res, next) {
     if (!req.path.startsWith('/api/')) return next();
     if (SKIP_PATHS.has(req.path)) return next();
+    // Administrative and internal endpoints can contain sensitive operational data.
+    if (req.path === '/api/admin' || req.path.startsWith('/api/admin/') ||
+        req.path === '/api/internal' || req.path.startsWith('/api/internal/')) return next();
     const ua = req.get('user-agent') || '';
     if (/ZCard-Control-Room-self-ping/i.test(ua)) return next();
 
@@ -256,7 +299,7 @@ function createStatsTracker({ getSupabase, logger }) {
         if (!page || page.length < PAGE_SIZE) break;
       }
 
-      let rows = data;
+      let rows = (data || []).map(sanitizeStatsRow).filter(row => !isExcludedAnalyticsPath(row.path));
 
       // Post-filter if endpoint contained a query string
       if (endpoint && endpoint.includes('?')) {
@@ -364,7 +407,7 @@ function createStatsTracker({ getSupabase, logger }) {
         },
         window: { months: 3, timezone: LAGOS_TZ },
         filters: {
-          endpoint: endpoint || null,
+          endpoint: endpoint ? safePath(endpoint) : null,
           method: method || null,
           success: successOnly,
           failed: failedOnly,
@@ -409,13 +452,15 @@ function createStatsTracker({ getSupabase, logger }) {
       const { data, error } = await sb
         .from('endpoint_stats')
         .select('day, week, month, method, path, param_sig, total, ok, err, ms_sum, ms_max')
+        .not('path', 'like', '/api/admin%')
+        .not('path', 'like', '/api/internal%')
         .order('day', { ascending: false })
         .order('total', { ascending: false })
         .limit(limit + 1);
 
       if (error) throw error;
 
-      const rows = data || [];
+      const rows = (data || []).map(sanitizeStatsRow).filter(row => !isExcludedAnalyticsPath(row.path));
       const hasMore = rows.length > limit;
       const recent = rows.slice(0, limit).map(row => ({
         ...row,

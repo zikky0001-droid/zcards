@@ -942,11 +942,12 @@ const PUBLIC_ENDPOINT_DIRECTORY = {
   service: 'ZCard Control Room',
   documentation: {
     queryRules: [
-      'Endpoints ( /api/cards, /api/events, /api/random, /api/series, /api/stats ) require a valid API key.',
+      'Endpoints ( /api/cards, /api/events, /api/random, /api/series, /api/stats, /api/stats/recent ) require a valid API key.',
       'Add your key to the end of the URL e.g  ?key=YOUR_API_KEY',
       'Use "?" before the first query parameter.',
       'Use & between additional query parameters.',
       'Query parameter names are case-sensitive.',
+      'Analytics never records API keys, tokens, passwords, or other credential-like query parameters. Admin and internal endpoints are excluded from request analytics.',
       'For /api/cards and /api/events, limit defaults to 20 and cannot exceed 100. For /api/stats/recent, limit defaults to 50 and must be an integer from 1 to 500.',
       'page defaults to "1"',
       'search and q are the same parameter',
