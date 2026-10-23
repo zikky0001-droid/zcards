@@ -19,7 +19,7 @@ const ROUTE_PARAMS = {
   '/api/events':    { keys: ['page', 'limit', 'event', 'tier', 'search', 'q', 'series', 'anime',
                               'sort', 'order', 'byevent'],
                       enumVals: ['event', 'tier', 'sort', 'order', 'byevent'] },
-  '/api/stats':     { keys: ['daily', 'weekly', 'monthly', 'endpoint', 'method',
+  '/api/stats':     { keys: ['daily', 'weekly', 'monthly', 'endpoint', 'method', 'from', 'to',
                               'success', 'failed', 'top'],
                       enumVals: ['method'] },
   '/api/status':    { keys: [], enumVals: [] },
@@ -27,7 +27,7 @@ const ROUTE_PARAMS = {
   '/api/endpoint':  { keys: [], enumVals: [] },
 };
 
-const SKIP_PATHS = new Set(['/api/health', '/ping']);
+const SKIP_PATHS = new Set(['/api/health', '/ping', '/api/stats', '/api/stats/recent', '/api/endpoints', '/api/endpoint']);
 const MAX_PENDING_BUCKETS = 2000;
 const FLUSH_MS = 60_000;
 const PRUNE_MS = 6 * 60 * 60 * 1000; // 6 hours
@@ -111,7 +111,7 @@ function createStatsTracker({ getSupabase, logger }) {
 
   function record(req, res, ms) {
     const routeInfo = ROUTE_PARAMS[req.path];
-    const path = routeInfo ? req.path : 'UNMATCHED';
+    const path = req.path;
     const paramSig = routeInfo ? buildParamSig(req.query || {}, routeInfo) : '';
     const cal = lagosCalendar();
     const method = req.method;
@@ -241,17 +241,22 @@ function createStatsTracker({ getSupabase, logger }) {
     const topN = q.top ? Math.min(500, Math.max(1, Number(q.top) || 0)) : null;
 
     try {
-      let base = sb.from('endpoint_stats').select(
-        'day, week, month, method, path, param_sig, total, ok, err, ms_sum, ms_max'
-      );
-      if (method) base = base.eq('method', method);
-      // If endpoint is just a path (no '?'), we can filter server-side
-      if (endpoint && !endpoint.includes('?')) base = base.eq('path', endpoint);
+      const PAGE_SIZE = 1000;
+      const data = [];
+      for (let offset = 0; ; offset += PAGE_SIZE) {
+        let pageQuery = sb.from('endpoint_stats').select(
+          'day, week, month, method, path, param_sig, total, ok, err, ms_sum, ms_max'
+        ).range(offset, offset + PAGE_SIZE - 1);
+        if (method) pageQuery = pageQuery.eq('method', method);
+        // If endpoint is just a path (no '?'), filter in the database.
+        if (endpoint && !endpoint.includes('?')) pageQuery = pageQuery.eq('path', endpoint);
+        const { data: page, error } = await pageQuery;
+        if (error) throw error;
+        data.push(...(page || []));
+        if (!page || page.length < PAGE_SIZE) break;
+      }
 
-      const { data, error } = await base;
-      if (error) throw error;
-
-      let rows = data || [];
+      let rows = data;
 
       // Post-filter if endpoint contained a query string
       if (endpoint && endpoint.includes('?')) {
@@ -380,6 +385,64 @@ function createStatsTracker({ getSupabase, logger }) {
     }
   }
 
+
+  // ---------- GET /api/stats/recent ----------
+  // Returns recent daily aggregate rows, not individual request-by-request logs.
+
+  async function recentHandler(req, res) {
+    const sb = getSupabase();
+    if (!sb) return res.status(503).json({ ok: false, error: 'Stats unavailable' });
+
+    let limit = 50;
+    if (req.query?.limit !== undefined) {
+      const parsedLimit = Number(req.query.limit);
+      if (!Number.isSafeInteger(parsedLimit) || parsedLimit < 1 || parsedLimit > 500) {
+        return res.status(400).json({
+          ok: false,
+          error: 'limit must be an integer between 1 and 500',
+        });
+      }
+      limit = parsedLimit;
+    }
+
+    try {
+      const { data, error } = await sb
+        .from('endpoint_stats')
+        .select('day, week, month, method, path, param_sig, total, ok, err, ms_sum, ms_max')
+        .order('day', { ascending: false })
+        .order('total', { ascending: false })
+        .limit(limit + 1);
+
+      if (error) throw error;
+
+      const rows = data || [];
+      const hasMore = rows.length > limit;
+      const recent = rows.slice(0, limit).map(row => ({
+        ...row,
+        avg_time: row.total > 0 ? `${Math.round(row.ms_sum / row.total)} ms` : '0 ms',
+        max_time: `${row.ms_max} ms`,
+      }));
+
+      return res.json({
+        ok: true,
+        limit,
+        count: recent.length,
+        hasMore,
+        window: { months: 3, timezone: LAGOS_TZ },
+        generatedAt: new Date().toISOString(),
+        recent,
+      });
+    } catch (error) {
+      const msg = error?.message || String(error);
+      if (logger) logger.log('ERROR', 'stats', 'Recent stats query failed', { error: msg });
+      return res.status(502).json({
+        ok: false,
+        error: 'Recent stats query failed',
+        details: msg,
+      });
+    }
+  }
+
   // ---------- Lifecycle ----------
 
   function start() {
@@ -418,7 +481,15 @@ function createStatsTracker({ getSupabase, logger }) {
     };
   }
 
-  return { middleware, handler, start, stop, flushNow: flush, snapshot };
+  return {
+    middleware,
+    handler,
+    recentHandler,
+    start,
+    stop,
+    flushNow: flush,
+    snapshot,
+  };
 }
 
 module.exports = { createStatsTracker };

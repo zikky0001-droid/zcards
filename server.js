@@ -818,6 +818,7 @@ app.post('/api/internal/logs', requireInternalOrAdmin, (req, res) => {
 // -----------------------------------------------------------------------------
 
 app.get('/api/stats', requireApiKey, stats.handler);
+app.get('/api/stats/recent', requireApiKey, stats.recentHandler);
 
 app.get('/api/cards', requireApiKey, async (req, res) => {
   if (!supabase) return res.status(503).json({ ok: false, error: 'Catalog database unavailable' });
@@ -946,7 +947,7 @@ const PUBLIC_ENDPOINT_DIRECTORY = {
       'Use "?" before the first query parameter.',
       'Use & between additional query parameters.',
       'Query parameter names are case-sensitive.',
-      'limit defaults to 20 and cannot exceed 100.',
+      'For /api/cards and /api/events, limit defaults to 20 and cannot exceed 100. For /api/stats/recent, limit defaults to 50 and must be an integer from 1 to 500.',
       'page defaults to "1"',
       'search and q are the same parameter',
       'series and anime are aliases.',
@@ -976,6 +977,20 @@ const PUBLIC_ENDPOINT_DIRECTORY = {
       method: 'GET', path: '/api/stats', description: 'API usage analytics.', 
       parameters: { key: 'Required API key (or Admin key).', daily: 'true', weekly: 'true', monthly: 'true' }, 
       examples: ['/api/stats?key=YOUR_KEY', '/api/stats?daily=true&key=YOUR_KEY'] 
+    },
+    {
+      method: 'GET',
+      path: '/api/stats/recent',
+      description: 'Returns recent daily aggregate rows from endpoint_stats, newest day first and then highest total. This is not an individual request log.',
+      parameters: {
+        key: 'Required API key (or Admin key).',
+        limit: 'Optional integer from 1 to 500. Defaults to 50.',
+      },
+      examples: [
+        '/api/stats/recent?key=YOUR_KEY',
+        '/api/stats/recent?limit=100&key=YOUR_KEY',
+        '/api/stats/recent?limit=500&key=YOUR_KEY',
+      ],
     },
     { 
       method: 'GET', path: '/api/cards', description: 'Search and paginate main-catalog cards.', 
