@@ -8,6 +8,7 @@ const { createClient } = require('@supabase/supabase-js');
 const { ShoobCardScraper } = require('./cards.js');
 const { ShoobEventScraper, groupCardsByEvent } = require('./events.js');
 const logger = require('./logger.js');
+const { createStatsTracker } = require('./stats.js');
 
 const app = express();
 
@@ -47,6 +48,13 @@ if (process.env.SUPABASE_URL && process.env.SUPABASE_SERVICE_ROLE_KEY) {
 } else {
   logger.log('WARN', 'startup', 'Supabase environment variables are not configured');
 }
+
+// Initialize the stats tracker with a live getter for the supabase client
+const stats = createStatsTracker({ getSupabase: () => supabase, logger });
+
+// Mount the stats middleware immediately after static files
+// It will record all /api/* routes except /api/health, /ping, and self-pings
+app.use(stats.middleware);
 
 const state = {
   startedAt: new Date().toISOString(),
@@ -683,7 +691,6 @@ async function scrapeEventsAndSync(trigger) {
     state.events.finishedAt = new Date().toISOString();
   } catch (e) {
     state.events.error = e.message || String(e);
-    // Matches the scraper module's message regardless of brand wording
     const unknownMatch = state.events.error.match(/New (?:Shoob|ZCard) event\(s\) need to be added before syncing: (.+)$/);
     if (unknownMatch) {
       state.events.menuChecked = true;
@@ -974,6 +981,7 @@ app.get('/api/status', (req, res) => {
     selfPingIntervalMs: SELF_PING_MS,
     retentionDays: 7,
     retentionCleanupIntervalMs: RETENTION_CLEANUP_MS,
+    stats: stats.snapshot(), // Exposing stats health for the dashboard
   });
 });
 
@@ -1191,6 +1199,9 @@ app.post('/api/internal/logs', requireInternalOrAdmin, (req, res) => {
 // Public catalog endpoints (SAFE-RANGE PAGINATION)
 // -----------------------------------------------
 
+// New Stats endpoint
+app.get('/api/stats', stats.handler);
+
 app.get('/api/cards', async (req, res) => {
   if (!supabase) return res.status(503).json({ ok: false, error: 'Catalog database unavailable' });
 
@@ -1211,7 +1222,6 @@ app.get('/api/cards', async (req, res) => {
   };
 
   try {
-    // 1) Exact filtered count first (head query, no rows transferred)
     const { count, error: countErr } = await buildFilteredQuery(
       supabase.from('cards').select('id', { count: 'exact', head: true })
     );
@@ -1221,7 +1231,6 @@ app.get('/api/cards', async (req, res) => {
     const pages = Math.ceil(safeCount / limit);
     const safeStart = (page - 1) * limit;
 
-    // 2) Requested page lies beyond the data → graceful empty page, never a range error
     if (safeCount === 0 || safeStart >= safeCount) {
       const uniqueData = safeCount === 0
         ? { uniqueCount: 0, breakdown: includeBreakdown ? {} : null }
@@ -1243,7 +1252,6 @@ app.get('/api/cards', async (req, res) => {
       return res.json(emptyResponse);
     }
 
-    // 3) Clamp the range so it can never exceed the last existing row
     const safeEnd = Math.min(page * limit - 1, safeCount - 1);
 
     const sortedQuery = applySort(
@@ -1311,7 +1319,6 @@ app.get('/api/events', async (req, res) => {
   };
 
   try {
-    // 1) Exact filtered count first (head query, no rows transferred)
     const { count, error: countErr } = await buildFilteredQuery(
       supabase.from('event_cards').select('id', { count: 'exact', head: true })
     );
@@ -1321,7 +1328,6 @@ app.get('/api/events', async (req, res) => {
     const pages = Math.ceil(safeCount / limit);
     const safeStart = (page - 1) * limit;
 
-    // 2) Requested page lies beyond the data → graceful empty page, never a range error
     if (safeCount === 0 || safeStart >= safeCount) {
       const uniqueData = safeCount === 0
         ? { uniqueCount: 0, breakdown: includeBreakdown ? {} : null }
@@ -1343,7 +1349,6 @@ app.get('/api/events', async (req, res) => {
       return res.json(emptyResponse);
     }
 
-    // 3) Clamp the range so it can never exceed the last existing row
     const safeEnd = Math.min(page * limit - 1, safeCount - 1);
 
     const sortedQuery = applySort(
@@ -1386,14 +1391,100 @@ app.get('/api/events', async (req, res) => {
 
 app.get('/api/random', async (req, res) => {
   if (!supabase) return res.status(503).json({ ok: false, error: 'Catalog database unavailable' });
-  const { count, error: countError } = await supabase.from('cards').select('id', { count: 'exact', head: true });
-  if (countError || !count) return res.status(404).json({ ok: false, error: 'No cards available' });
 
-  const offset = crypto.randomInt(0, count);
-  const { data, error } = await supabase.from('cards').select('*').range(offset, offset).maybeSingle();
-  if (error || !data) return res.status(502).json({ ok: false, error: 'Random card query failed' });
+  const filters = getSearchFilters(req);
+  const buildFilteredQuery = query => applyCardFilters(query, filters);
+  const startTime = Date.now();
 
-  res.json({ ok: true, data });
+  const filtersEcho = {
+    tier: filters.tier || null,
+    series: filters.series || null,
+    search: filters.search || null,
+  };
+
+  try {
+    const { count, error: countError } = await buildFilteredQuery(
+      supabase.from('cards').select('id', { count: 'exact', head: true })
+    );
+    if (countError) throw countError;
+
+    const safeCount = count || 0;
+
+    if (safeCount === 0) {
+      return res.status(404).json({
+        ok: false,
+        error: 'No cards match the provided filters',
+        filters: filtersEcho,
+        durationMs: Date.now() - startTime,
+        timestamps: getTimestamps()
+      });
+    }
+
+    const offset = crypto.randomInt(0, safeCount);
+
+    const { data, error } = await buildFilteredQuery(supabase.from('cards').select('*'))
+      .range(offset, offset)
+      .maybeSingle();
+
+    if (error || !data) throw error || new Error('No data returned');
+
+    res.json({
+      ok: true,
+      pool_size: safeCount,
+      filters: filtersEcho,
+      durationMs: Date.now() - startTime,
+      timestamps: getTimestamps(),
+      data
+    });
+  } catch (error) {
+    const errMsg = error?.message || String(error);
+    const errDetails = error?.details || error?.hint || 'No additional details provided by database.';
+    console.error(`[API RANDOM ERROR] ${errMsg}`, errDetails);
+    logger.log('ERROR', 'api-random', 'Random endpoint failed', { error: errMsg, details: errDetails });
+    return res.status(502).json({ ok: false, error: 'Random card query failed', details: errDetails });
+  }
+});
+
+// -----------------------------------------------
+// NEW: Lightweight Series List Endpoint
+// -----------------------------------------------
+app.get('/api/series', async (req, res) => {
+  if (!supabase) return res.status(503).json({ ok: false, error: 'Catalog database unavailable' });
+
+  const eventSlug = req.query.event ? String(req.query.event).trim().slice(0, 80) : '';
+  const startTime = Date.now();
+
+  // Switch tables based on whether an event filter is provided
+  const table = eventSlug ? 'event_cards' : 'cards';
+  const column = 'series';
+
+  const applyFilters = (query) => {
+    if (eventSlug) {
+      query = query.eq('event_slug', eventSlug);
+    }
+    return query;
+  };
+
+  try {
+    // Reuse our efficient batch-counting function to build the dictionary
+    const { uniqueCount, breakdown } = await getUniqueCounts(table, column, applyFilters, true);
+
+    res.json({
+      ok: true,
+      total_series: uniqueCount,
+      event: eventSlug || null,
+      source_table: table,
+      series: breakdown || {}, // The 1-by-1 counts per series
+      durationMs: Date.now() - startTime,
+      timestamps: getTimestamps(),
+    });
+  } catch (error) {
+    const errMsg = error?.message || String(error);
+    const errDetails = error?.details || error?.hint || 'No additional details provided by database.';
+    console.error(`[API SERIES ERROR] ${errMsg}`, errDetails);
+    logger.log('ERROR', 'api-series', 'Series endpoint failed', { error: errMsg, details: errDetails });
+    return res.status(502).json({ ok: false, error: 'Series query failed', details: errDetails });
+  }
 });
 
 app.get('/api/admin/catalog', requireAdmin, async (req, res) => {
@@ -1454,7 +1545,58 @@ const PUBLIC_ENDPOINT_DIRECTORY = {
     {
       method: 'GET',
       path: '/api/random',
-      description: 'Returns one random main-catalog card.',
+      description: 'Returns one random main-catalog card. Accepts the same filters as /api/cards to pick from a specific pool.',
+      parameters: {
+        tier: 'Exact tier match.',
+        search: 'Partial search across name and series.',
+        q: 'Alias for search.',
+        series: 'Partial series match.',
+        anime: 'Alias for series.',
+      },
+      examples: [
+        '/api/random',
+        '/api/random?tier=S',
+        '/api/random?series=one%20piece',
+        '/api/random?q=goku&tier=4'
+      ],
+    },
+    {
+      method: 'GET',
+      path: '/api/series',
+      description: 'Returns a lightweight dictionary of all anime series and their card counts. No card data is returned.',
+      parameters: {
+        event: 'Optional. Exact event slug (e.g., summer, gala). If omitted, returns series from the main collection.',
+      },
+      examples: [
+        '/api/series',
+        '/api/series?event=summer',
+        '/api/series?event=gala'
+      ],
+    },
+    {
+      method: 'GET',
+      path: '/api/stats',
+      description: 'Public analytics for every recorded /api/* endpoint. Data stored in Supabase with a rolling 3-calendar-month window (Lagos time).',
+      parameters: {
+        daily:   'true → include per-day breakdown.',
+        weekly:  'true → include per-week breakdown (weeks start Sunday, Lagos).',
+        monthly: 'true → include per-month breakdown.',
+        endpoint: 'Filter by path, e.g. /api/events or /api/events?event=summer.',
+        method:   'Filter by HTTP method (GET or POST).',
+        success:  'true → only count status < 400 in totals.',
+        failed:   'true → only count status >= 400 in totals.',
+        top:      'Cap each breakdown to the top N endpoint/signature rows.',
+      },
+      examples: [
+        '/api/stats',
+        '/api/stats?daily=true',
+        '/api/stats?weekly=true',
+        '/api/stats?monthly=true',
+        '/api/stats?daily=true&endpoint=/api/cards',
+        '/api/stats?daily=true&endpoint=/api/events%3Fevent=summer',
+        '/api/stats?weekly=true&failed=true',
+        '/api/stats?monthly=true&success=true&top=20',
+      ],
     },
     {
       method: 'GET',
@@ -1553,6 +1695,7 @@ const server = app.listen(PORT, () => {
     hourlySlots: 24,
   });
 
+  stats.start(); // Start stats flusher and pruner
   state.nextSourceCheckAt = nextLagosHourIso();
   void monitorOnce();
 
@@ -1566,8 +1709,9 @@ const server = app.listen(PORT, () => {
   setTimeout(() => void selfPingOnce(), 90_000).unref();
 });
 
-const shutdown = signal => {
+const shutdown = async signal => {
   logger.log('WARN', 'shutdown', `${signal} received; closing HTTP server`);
+  try { await stats.stop(); } catch (e) { /* best-effort final flush */ }
   server.close(() => process.exit(0));
   setTimeout(() => process.exit(1), 10_000).unref();
 };
@@ -1579,6 +1723,5 @@ process.on('uncaughtException', e => logger.log('ERROR', 'process', 'Uncaught ex
 process.on('unhandledRejection', e => logger.log('ERROR', 'process', 'Unhandled rejection', { error: e?.message || String(e) }));
 
 // end of server.js
-
 
 
