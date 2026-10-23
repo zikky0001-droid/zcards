@@ -233,7 +233,7 @@ function requireApiKey(req, res, next) {
   if (!providedKey) {
     return res.status(401).json({
       ok: false,
-      error: 'API key is required. Append &key=YOUR_KEY to the URL.'
+      error: 'Your API key is required. add  &key=YOUR_KEY to the URL.'
     });
   }
 
