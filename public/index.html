@@ -281,39 +281,19 @@ const $=id=>document.getElementById(id);let adminKey=sessionStorage.getItem('sho
 function esc(v){return String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))}
 const THEME_KEY='shoob-control-room-theme';
 const palettes={
-  dark:[ // 15 colours
-    {a:'#a99aff',b:'#7d68f5',rgb:'169,154,255'}, // violet
-    {a:'#72d7ff',b:'#458cff',rgb:'114,215,255'}, // cyan
-    {a:'#70e0bb',b:'#2cae91',rgb:'112,224,187'}, // mint
-    {a:'#ff9acb',b:'#d75caa',rgb:'255,154,203'}, // pink
-    {a:'#ffc77d',b:'#e58a4f',rgb:'255,199,125'}, // amber
-    {a:'#a6b6ff',b:'#6f7ef0',rgb:'166,182,255'}, // periwinkle
-    {a:'#ff8a8a',b:'#e05252',rgb:'255,138,138'}, // rose
-    {a:'#5ee6e6',b:'#2ba8a8',rgb:'94,230,230'},  // teal
-    {a:'#b8f26b',b:'#7cb83a',rgb:'184,242,107'}, // lime
-    {a:'#d0a6ff',b:'#9a5ce0',rgb:'208,166,255'}, // lavender
-    {a:'#8ad4ff',b:'#4a90d9',rgb:'138,212,255'}, // sky
-    {a:'#ffa07a',b:'#e06a3f',rgb:'255,160,122'}, // coral
-    {a:'#ffe08a',b:'#d9a53f',rgb:'255,224,138'}, // gold
-    {a:'#6ef0c8',b:'#2fae8c',rgb:'110,240,200'}, // jade
-    {a:'#e79aff',b:'#b34fd1',rgb:'231,154,255'}  // orchid
+  dark:[ 
+    {a:'#a99aff',b:'#7d68f5',rgb:'169,154,255'}, {a:'#72d7ff',b:'#458cff',rgb:'114,215,255'}, {a:'#70e0bb',b:'#2cae91',rgb:'112,224,187'},
+    {a:'#ff9acb',b:'#d75caa',rgb:'255,154,203'}, {a:'#ffc77d',b:'#e58a4f',rgb:'255,199,125'}, {a:'#a6b6ff',b:'#6f7ef0',rgb:'166,182,255'},
+    {a:'#ff8a8a',b:'#e05252',rgb:'255,138,138'}, {a:'#5ee6e6',b:'#2ba8a8',rgb:'94,230,230'}, {a:'#b8f26b',b:'#7cb83a',rgb:'184,242,107'},
+    {a:'#d0a6ff',b:'#9a5ce0',rgb:'208,166,255'}, {a:'#8ad4ff',b:'#4a90d9',rgb:'138,212,255'}, {a:'#ffa07a',b:'#e06a3f',rgb:'255,160,122'},
+    {a:'#ffe08a',b:'#d9a53f',rgb:'255,224,138'}, {a:'#6ef0c8',b:'#2fae8c',rgb:'110,240,200'}, {a:'#e79aff',b:'#b34fd1',rgb:'231,154,255'}
   ],
-  light:[ // 15 colours
-    {a:'#6753dc',b:'#4b37b8',rgb:'103,83,220'},  // violet
-    {a:'#006fae',b:'#1455ad',rgb:'0,111,174'},   // blue
-    {a:'#087d5c',b:'#08664d',rgb:'8,125,92'},    // green
-    {a:'#ad337a',b:'#84205c',rgb:'173,51,122'},  // magenta
-    {a:'#9a5800',b:'#794600',rgb:'154,88,0'},    // amber
-    {a:'#4d58bf',b:'#333e9a',rgb:'77,88,191'},   // indigo
-    {a:'#b03030',b:'#8a1f1f',rgb:'176,48,48'},   // red
-    {a:'#007a7a',b:'#005f5f',rgb:'0,122,122'},   // teal
-    {a:'#5c8a1f',b:'#456b12',rgb:'92,138,31'},   // olive
-    {a:'#7a3fd4',b:'#5c2ba8',rgb:'122,63,212'},  // purple
-    {a:'#2f6ea8',b:'#1f4f80',rgb:'47,110,168'},  // steel blue
-    {a:'#b3502a',b:'#8f3c1c',rgb:'179,80,42'},   // burnt orange
-    {a:'#8f6b00',b:'#6d5200',rgb:'143,107,0'},   // dark gold
-    {a:'#0a7a5f',b:'#065f4a',rgb:'10,122,95'},   // deep jade
-    {a:'#9330a8',b:'#701e85',rgb:'147,48,168'}   // plum
+  light:[
+    {a:'#6753dc',b:'#4b37b8',rgb:'103,83,220'}, {a:'#006fae',b:'#1455ad',rgb:'0,111,174'}, {a:'#087d5c',b:'#08664d',rgb:'8,125,92'},
+    {a:'#ad337a',b:'#84205c',rgb:'173,51,122'}, {a:'#9a5800',b:'#794600',rgb:'154,88,0'}, {a:'#4d58bf',b:'#333e9a',rgb:'77,88,191'},
+    {a:'#b03030',b:'#8a1f1f',rgb:'176,48,48'}, {a:'#007a7a',b:'#005f5f',rgb:'0,122,122'}, {a:'#5c8a1f',b:'#456b12',rgb:'92,138,31'},
+    {a:'#7a3fd4',b:'#5c2ba8',rgb:'122,63,212'}, {a:'#2f6ea8',b:'#1f4f80',rgb:'47,110,168'}, {a:'#b3502a',b:'#8f3c1c',rgb:'179,80,42'},
+    {a:'#8f6b00',b:'#6d5200',rgb:'143,107,0'}, {a:'#0a7a5f',b:'#065f4a',rgb:'10,122,95'}, {a:'#9330a8',b:'#701e85',rgb:'147,48,168'}
   ]
 };
 
@@ -323,7 +303,17 @@ function rotateAccent(force=false){const list=palettes[themeMode]||palettes.dark
 applyTheme(themeMode,false);$('themeToggle').addEventListener('click',()=>applyTheme(themeMode==='dark'?'light':'dark'));setInterval(()=>rotateAccent(),2000);
 
 function toast(message,kind='good'){const t=$('toast');t.textContent=message;t.className='toast show '+kind;clearTimeout(toastTimer);toastTimer=setTimeout(()=>t.className='toast',3600)}
-async function api(url,opts={}){const r=await fetch(url,{...opts,headers:{'Content-Type':'application/json','x-admin-key':adminKey,...(opts.headers||{})}});let d={};try{d=await r.json()}catch{}if(!r.ok)throw new Error(d.error||`HTTP ${r.status}`);return d}
+
+// --- UPDATED API HELPER: Automatically appends &key= to the URL for protected endpoints ---
+async function api(url,opts={}){
+    let finalUrl = url;
+    if (adminKey) {
+        finalUrl += (url.includes('?') ? '&' : '?') + 'key=' + encodeURIComponent(adminKey);
+    }
+    const r=await fetch(finalUrl,{...opts,headers:{'Content-Type':'application/json','x-admin-key':adminKey,...(opts.headers||{})}});
+    let d={};try{d=await r.json()}catch{}if(!r.ok)throw new Error(d.error||`HTTP ${r.status}`);return d
+}
+
 function showApp(){$('loginView').classList.add('hidden');$('appView').classList.remove('hidden')}
 function showLogin(){$('appView').classList.add('hidden');$('loginView').classList.remove('hidden')}
 function openDrawer(open){$('sidebar').classList.toggle('open',open);$('drawerScrim').classList.toggle('show',open);$('menuBtn').setAttribute('aria-expanded',String(open));$('menuBtn').textContent=open?'×':'☰'}
@@ -338,119 +328,60 @@ function fmt(n){return Number.isFinite(Number(n))?Number(n).toLocaleString():'�
 function shortTime(v){
   if(!v)return '—';
   const d=new Date(v);
-  return Number.isNaN(d.getTime())
-    ? '—'
-    : d.toLocaleTimeString('en-GB',{
-        timeZone:'Africa/Lagos',
-        hour:'2-digit',
-        minute:'2-digit',
-        hour12:false
-      })+' WAT';
+  return Number.isNaN(d.getTime()) ? '—' : d.toLocaleTimeString('en-GB',{timeZone:'Africa/Lagos',hour:'2-digit',minute:'2-digit',hour12:false})+' WAT';
 }
 function lagosDateTime(v){
   if(!v)return '—';
   const d=new Date(v);
   if(Number.isNaN(d.getTime()))return '—';
-  return d.toLocaleString('en-GB',{
-    timeZone:'Africa/Lagos',
-    year:'numeric',
-    month:'short',
-    day:'2-digit',
-    hour:'2-digit',
-    minute:'2-digit',
-    second:'2-digit',
-    hour12:false
-  })+' WAT';
+  return d.toLocaleString('en-GB',{timeZone:'Africa/Lagos',year:'numeric',month:'short',day:'2-digit',hour:'2-digit',minute:'2-digit',second:'2-digit',hour12:false})+' WAT';
 }
-function scheduleLabel(s){
-  if(s?.nextSourceCheckAt){
-    return 'Next '+lagosDateTime(s.nextSourceCheckAt);
-  }
-  return 'Hourly schedule · Africa/Lagos (WAT)';
-}
+function scheduleLabel(s){ return s?.nextSourceCheckAt ? 'Next '+lagosDateTime(s.nextSourceCheckAt) : 'Hourly schedule · Africa/Lagos (WAT)'; }
 function cardState(s){if(s?.isScraping)return 'Checking source…';if(s?.error)return 'Needs attention';if(s?.count>0)return 'Available';return 'Waiting'}
-function updateStatus(s){lastStatus=s;const connected=!!s.supabaseReachable;$('dbStatus').textContent=connected?'Online':s.supabaseConfigured===false?'Setup needed':'Offline';$('dbSub').textContent=s.lastMonitorAt?'Probe '+shortTime(s.lastMonitorAt):'Waiting for health probe';$('connectionText').textContent=connected?'Supabase connected':'Supabase unavailable';statusDot('connectionDot',connected?'ok':'bad');$('mainCount').textContent=fmt(s.cards?.count);$('eventCount').textContent=fmt(s.events?.count);$('mainCountDetail').textContent=fmt(s.cards?.count);$('eventCountDetail').textContent=fmt(s.events?.count);$('mainCompare').textContent=`Shoob total: ${fmt(s.cards?.sourceTotal ?? s.cards?.expected)}`;$('eventCompare').textContent=`Shoob total: ${fmt(s.events?.sourceTotal ?? s.events?.expected)}`;$('mainBar').style.width=(s.cards?.sourceTotal?Math.min(100,(s.cards.count/s.cards.sourceTotal)*100):0)+'%';$('eventBar').style.width=(s.events?.sourceTotal?Math.min(100,(s.events.count/s.events.sourceTotal)*100):0)+'%';$('lastCheckMetric').textContent=shortTime(s.lastSourceCheckAt);$('nextCheckMetric').textContent=scheduleLabel(s);$('mainStorage').textContent='Storage: '+(s.cards?.storage||'unknown');$('eventStorage').textContent='Storage: '+(s.events?.storage||'unknown');$('mainMeta').textContent=`Last successful repair: ${s.cards?.lastSyncAt?new Date(s.cards.lastSyncAt).toLocaleString():'not yet'}${s.cards?.error?' · '+s.cards.error:''}`;$('eventMeta').textContent=`Last successful repair: ${s.events?.lastSyncAt?new Date(s.events.lastSyncAt).toLocaleString():'not yet'}${s.events?.error?' · '+s.events.error:''}`;$('mainSourceDetail').textContent=`Shoob ${fmt(s.cards?.sourceTotal ?? s.cards?.expected)} · Supabase ${fmt(s.cards?.count)}`;$('eventSourceDetail').textContent=`Shoob ${fmt(s.events?.sourceTotal ?? s.events?.expected)} · Supabase ${fmt(s.events?.count)}`;$('mainDeltaDetail').textContent=s.cards?.countsMatch===true?'MATCH':s.cards?.countsMatch===false?'MISMATCH':'CHECK';$('mainDeltaDetail').className='state '+(s.cards?.countsMatch===true?'good':s.cards?.countsMatch===false?'warn':'');$('eventDeltaDetail').textContent=s.events?.countsMatch===true?'MATCH':s.events?.countsMatch===false?'MISMATCH':'CHECK';$('eventDeltaDetail').className='state '+(s.events?.error?'bad':s.events?.countsMatch===true?'good':s.events?.countsMatch===false?'warn':'');$('mainDeltaText').textContent=`${fmt(s.cards?.lastDelta||0)} cards added in the last incremental repair`;$('eventMenuDetail').textContent=s.events?.menuChecked===true?(s.events?.unknownEvents?.length?`Unknown events: ${s.events.unknownEvents.join(', ')}`:'Shoob menu verified'):(s.events?.menuChecked===false?(s.events?.menuError||'Menu check failed'):s.events?.unknownEvents?.length?`New events need review: ${s.events.unknownEvents.join(', ')}`:'Not checked yet');$('runtime').textContent = s.uptime || '—';$('memory').textContent=`${s.memory?.rssMb??'—'} MB RSS · ${s.memory?.heapMb??'—'} MB heap`;$('logCount').textContent=`${s.logBuffer?.current||0} / 5,000`;$('healthDbText').textContent=s.supabaseError||'Database probe responding';setState('healthDbState',connected?'HEALTHY':'OFFLINE',connected?'good':'bad');$('healthMainText').textContent=`${fmt(s.cards?.count)} records · storage ${s.cards?.storage||'unknown'}${s.cards?.error?' · '+s.cards.error:''}`;setState('healthMainState',s.cards?.error?'ATTENTION':s.cards?.count>0&&s.cards?.storage==='available'?'READY':'CHECK',s.cards?.error?'bad':s.cards?.count>0?'good':'warn');$('healthEventText').textContent=`${fmt(s.events?.count)} records · storage ${s.events?.storage||'unknown'}${s.events?.error?' · '+s.events.error:''}`;setState('healthEventState',s.events?.error?'ATTENTION':s.events?.count>0&&s.events?.storage==='available'?'READY':'CHECK',s.events?.error?'bad':s.events?.count>0?'good':'warn');const anyJob=!!(s.cards?.isScraping||s.events?.isScraping);$('healthGuardText').textContent=anyJob?'A guarded sync is running; duplicate starts are blocked':'No overlapping jobs reported; automatic deletions are disabled';setState('healthGuardState',anyJob?'ACTIVE · BUSY':'ACTIVE','good');$('healthBadge').textContent=!connected?'Needs attention':(s.cards?.error||s.events?.error)?'Issues detected':anyJob?'Sync in progress':'Monitoring';$('sideHealthText').textContent=!connected?'Database offline':(s.cards?.error||s.events?.error)?'Attention required':anyJob?'Incremental check running':'Systems operational';$('sideHealthSub').textContent=`DB ${connected?'connected':'offline'} · Main ${cardState(s.cards)} · Events ${cardState(s.events)}`;statusDot('sideHealthDot',!connected?'bad':(s.cards?.error||s.events?.error)?'warn':'ok');const banner=$('banner');const issue=!connected?(s.supabaseError||'Supabase is unavailable or not configured.'):s.cards?.error||s.events?.error;if(issue){banner.textContent=issue;banner.classList.remove('hidden','good');banner.classList.add('bad')}else{banner.classList.add('hidden');banner.classList.remove('bad')}$('diagPreview').textContent=JSON.stringify(safeDiagnostics(s),null,2)}
+
+function updateStatus(s){lastStatus=s;const connected=!!s.supabaseReachable;$('dbStatus').textContent=connected?'Online':s.supabaseConfigured===false?'Setup needed':'Offline';$('dbSub').textContent=s.lastMonitorAt?'Probe '+shortTime(s.lastMonitorAt):'Waiting for health probe';$('connectionText').textContent=connected?'Supabase connected':'Supabase unavailable';statusDot('connectionDot',connected?'ok':'bad');$('mainCount').textContent=fmt(s.cards?.count);$('eventCount').textContent=fmt(s.events?.count);$('mainCountDetail').textContent=fmt(s.cards?.count);$('eventCountDetail').textContent=fmt(s.events?.count);$('mainCompare').textContent=`ZCard total: ${fmt(s.cards?.sourceTotal ?? s.cards?.expected)}`;$('eventCompare').textContent=`ZCard total: ${fmt(s.events?.sourceTotal ?? s.events?.expected)}`;$('mainBar').style.width=(s.cards?.sourceTotal?Math.min(100,(s.cards.count/s.cards.sourceTotal)*100):0)+'%';$('eventBar').style.width=(s.events?.sourceTotal?Math.min(100,(s.events.count/s.events.sourceTotal)*100):0)+'%';$('lastCheckMetric').textContent=shortTime(s.lastSourceCheckAt);$('nextCheckMetric').textContent=scheduleLabel(s);$('mainStorage').textContent='Storage: '+(s.cards?.storage||'unknown');$('eventStorage').textContent='Storage: '+(s.events?.storage||'unknown');$('mainMeta').textContent=`Last successful repair: ${s.cards?.lastSyncAt?new Date(s.cards.lastSyncAt).toLocaleString():'not yet'}${s.cards?.error?' · '+s.cards.error:''}`;$('eventMeta').textContent=`Last successful repair: ${s.events?.lastSyncAt?new Date(s.events.lastSyncAt).toLocaleString():'not yet'}${s.events?.error?' · '+s.events.error:''}`;$('mainSourceDetail').textContent=`ZCard ${fmt(s.cards?.sourceTotal ?? s.cards?.expected)} · Supabase ${fmt(s.cards?.count)}`;$('eventSourceDetail').textContent=`ZCard ${fmt(s.events?.sourceTotal ?? s.events?.expected)} · Supabase ${fmt(s.events?.count)}`;$('mainDeltaDetail').textContent=s.cards?.countsMatch===true?'MATCH':s.cards?.countsMatch===false?'MISMATCH':'CHECK';$('mainDeltaDetail').className='state '+(s.cards?.countsMatch===true?'good':s.cards?.countsMatch===false?'warn':'');$('eventDeltaDetail').textContent=s.events?.countsMatch===true?'MATCH':s.events?.countsMatch===false?'MISMATCH':'CHECK';$('eventDeltaDetail').className='state '+(s.events?.error?'bad':s.events?.countsMatch===true?'good':s.events?.countsMatch===false?'warn':'');$('mainDeltaText').textContent=`${fmt(s.cards?.lastDelta||0)} cards added in the last incremental repair`;$('eventMenuDetail').textContent=s.events?.menuChecked===true?(s.events?.unknownEvents?.length?`Unknown events: ${s.events.unknownEvents.join(', ')}`:'ZCard menu verified'):(s.events?.menuChecked===false?(s.events?.menuError||'Menu check failed'):s.events?.unknownEvents?.length?`New events need review: ${s.events.unknownEvents.join(', ')}`:'Not checked yet');$('runtime').textContent = s.uptime || '—';$('memory').textContent=`${s.memory?.rssMb??'—'} MB RSS · ${s.memory?.heapMb??'—'} MB heap`;$('logCount').textContent=`${s.logBuffer?.current||0} / 5,000`;$('healthDbText').textContent=s.supabaseError||'Database probe responding';setState('healthDbState',connected?'HEALTHY':'OFFLINE',connected?'good':'bad');$('healthMainText').textContent=`${fmt(s.cards?.count)} records · storage ${s.cards?.storage||'unknown'}${s.cards?.error?' · '+s.cards.error:''}`;setState('healthMainState',s.cards?.error?'ATTENTION':s.cards?.count>0&&s.cards?.storage==='available'?'READY':'CHECK',s.cards?.error?'bad':s.cards?.count>0?'good':'warn');$('healthEventText').textContent=`${fmt(s.events?.count)} records · storage ${s.events?.storage||'unknown'}${s.events?.error?' · '+s.events.error:''}`;setState('healthEventState',s.events?.error?'ATTENTION':s.events?.count>0&&s.events?.storage==='available'?'READY':'CHECK',s.events?.error?'bad':s.events?.count>0?'good':'warn');const anyJob=!!(s.cards?.isScraping||s.events?.isScraping);$('healthGuardText').textContent=anyJob?'A guarded sync is running; duplicate starts are blocked':'No overlapping jobs reported; automatic deletions are disabled';setState('healthGuardState',anyJob?'ACTIVE · BUSY':'ACTIVE','good');$('healthBadge').textContent=!connected?'Needs attention':(s.cards?.error||s.events?.error)?'Issues detected':anyJob?'Sync in progress':'Monitoring';$('sideHealthText').textContent=!connected?'Database offline':(s.cards?.error||s.events?.error)?'Attention required':anyJob?'Incremental check running':'Systems operational';$('sideHealthSub').textContent=`DB ${connected?'connected':'offline'} · Main ${cardState(s.cards)} · Events ${cardState(s.events)}`;statusDot('sideHealthDot',!connected?'bad':(s.cards?.error||s.events?.error)?'warn':'ok');const banner=$('banner');const issue=!connected?(s.supabaseError||'Supabase is unavailable or not configured.'):s.cards?.error||s.events?.error;if(issue){banner.textContent=issue;banner.classList.remove('hidden','good');banner.classList.add('bad')}else{banner.classList.add('hidden');banner.classList.remove('bad')}$('diagPreview').textContent=JSON.stringify(safeDiagnostics(s),null,2)}
 
 function safeDiagnostics(s) {
   return {
-    timestamp: new Date().toISOString(),
-    service: 'ZCard Control Room', // ✅ Rebranded
-    uptime: s.uptime,              // ✅ Updated from uptimeSeconds
-    timestamps: s.timestamps,      // ✅ Added new UTC & Lagos times
-    supabaseConfigured: s.supabaseConfigured,
-    supabaseReachable: s.supabaseReachable,
-    supabaseError: s.supabaseError,
-    lastMonitorAt: s.lastMonitorAt,
-    lastSourceCheckAt: s.lastSourceCheckAt,
-    nextSourceCheckAt: s.nextSourceCheckAt,
-    sourceCheckTimeZone: s.sourceCheckTimeZone || 'Africa/Lagos',
-    sourceCheckSchedule: s.sourceCheckSchedule || 'hourly',
-    selfPingIntervalMs: s.selfPingIntervalMs,
-    retentionDays: s.retentionDays,
-    cards: {
-      count: s.cards?.count,
-      sourceTotal: s.cards?.sourceTotal ?? s.cards?.expected,
-      countsMatch: s.cards?.countsMatch,
-      lastDelta: s.cards?.lastDelta,
-      storage: s.cards?.storage,
-      isScraping: s.cards?.isScraping,
-      error: s.cards?.error
-    },
-    events: {
-      count: s.events?.count,
-      sourceTotal: s.events?.sourceTotal ?? s.events?.expected,
-      countsMatch: s.events?.countsMatch,
-      lastDelta: s.events?.lastDelta,
-      storage: s.events?.storage,
-      isScraping: s.events?.isScraping,
-      menuChecked: s.events?.menuChecked,
-      menuError: s.events?.menuError,
-      unknownEvents: s.events?.unknownEvents,
-      error: s.events?.error
-    },
-    memory: s.memory,
-    logBuffer: s.logBuffer
+    timestamp: new Date().toISOString(), service: 'ZCard Control Room', uptime: s.uptime, timestamps: s.timestamps,
+    supabaseConfigured: s.supabaseConfigured, supabaseReachable: s.supabaseReachable, supabaseError: s.supabaseError,
+    lastMonitorAt: s.lastMonitorAt, lastSourceCheckAt: s.lastSourceCheckAt, nextSourceCheckAt: s.nextSourceCheckAt,
+    sourceCheckTimeZone: s.sourceCheckTimeZone || 'Africa/Lagos', sourceCheckSchedule: s.sourceCheckSchedule || 'hourly',
+    selfPingIntervalMs: s.selfPingIntervalMs, retentionDays: s.retentionDays,
+    cards: { count: s.cards?.count, sourceTotal: s.cards?.sourceTotal ?? s.cards?.expected, countsMatch: s.cards?.countsMatch, lastDelta: s.cards?.lastDelta, storage: s.cards?.storage, isScraping: s.cards?.isScraping, error: s.cards?.error },
+    events: { count: s.events?.count, sourceTotal: s.events?.sourceTotal ?? s.events?.expected, countsMatch: s.events?.countsMatch, lastDelta: s.events?.lastDelta, storage: s.events?.storage, isScraping: s.events?.isScraping, menuChecked: s.events?.menuChecked, menuError: s.events?.menuError, unknownEvents: s.events?.unknownEvents, error: s.events?.error },
+    memory: s.memory, logBuffer: s.logBuffer
   };
 }
 
-async function refreshStatus() {
-  const s = await api('/api/admin/status');
-  updateStatus(s);
-}
+async function refreshStatus() { const s = await api('/api/admin/status'); updateStatus(s); }
 
-// --- REFRESH LOGS (keeps <details> open state and the delete selection across refreshes) ---
 async function refreshLogs(){
     const p=new URLSearchParams({limit:'250',level:$('levelFilter').value,search:$('searchLogs').value});
     const d=await api('/api/admin/logs?'+p);
-    if(!d.logs.length){
-        $('logs').innerHTML='<div class="muted small">No logs match this filter.</div>';
-        logSel.sync();
-        return;
-    }
-
-    // Remember which <details> are open, keyed by log id (new entries no longer shift the state)
+    if(!d.logs.length){ $('logs').innerHTML='<div class="muted small">No logs match this filter.</div>'; logSel.sync(); return; }
     const openIds=new Set();
     document.querySelectorAll('#logs .log[data-id] details[open]').forEach(el=>openIds.add(el.closest('.log').dataset.id));
-
     $('logs').innerHTML = d.logs.map(l => `<article class="log" data-id="${esc(l.id)}">${l.id?`<label class="pick"><input type="checkbox" class="chk log-pick" data-id="${esc(l.id)}" aria-label="Select this log"></label>`:'<span></span>'}<time>${esc(new Date(l.timestamp).toLocaleString())}</time><span class="level ${esc(l.level)}">${esc(l.level)}</span><span class="component">${esc(l.component)}</span><div class="message">${esc(l.message)}${l.details && Object.keys(l.details).length ? `<details><summary class="muted small">Details</summary><pre>${esc(JSON.stringify(l.details, null, 2))}</pre></details>` : ''}</div></article>`).join('');
-
-    document.querySelectorAll('#logs .log[data-id]').forEach(a=>{
-        if(openIds.has(a.dataset.id)) a.querySelector('details')?.setAttribute('open','');
-    });
+    document.querySelectorAll('#logs .log[data-id]').forEach(a=>{ if(openIds.has(a.dataset.id)) a.querySelector('details')?.setAttribute('open',''); });
     logSel.sync();
 }
-// --------------------------------------------------------------------------------
 
 function runMarkup(r,selectable){const kind=r.status==='success'?'SUCCESS':r.status==='failed'?'ERROR':r.status==='warning'?'WARN':'INFO';const meta=r.metadata||{};const mode=meta.mode?` · ${meta.mode}`:'';const added=r.records_added!=null?` · ${fmt(r.records_added)} added`:'';const running=String(r.status||'').toLowerCase()==='running';const pick=selectable&&r.id!=null?`<label class="pick"><input type="checkbox" class="chk run-pick" data-id="${esc(r.id)}" aria-label="Select sync run"${running?' disabled title="Still running — can’t be deleted yet"':''}></label>`:'';return `<div class="list-row${pick?' selectable':''}"><div class="line"><span class="line-main">${pick}<strong>${esc(r.catalog||'catalog')} · ${esc(r.trigger||'run')}</strong></span><span class="level ${kind}">${esc(r.status||'unknown')}</span></div><small>${esc(r.started_at?new Date(r.started_at).toLocaleString():'—')} · ${fmt(r.records_found)} source records${added}${esc(mode)}${r.error?' · '+esc(r.error):''}</small></div>`}
+
 async function refreshRuns(){try{const d=await api('/api/admin/sync-runs');const html=d.runs.length?d.runs.slice(0,100).map(r=>runMarkup(r,true)).join(''):'<div class="muted small">No sync runs recorded yet.</div>';$('runs').innerHTML=html;runSel.sync();$('overviewRuns').innerHTML=d.runs.length?d.runs.slice(0,4).map(r=>runMarkup(r)).join(''):'<div class="muted small">No sync runs recorded yet.</div>'}catch(e){$('runs').textContent=e.message;runSel.sync()}}
+
 async function refreshAll(){if(!adminKey||refreshBusy)return;refreshBusy=true;try{await refreshStatus();await Promise.allSettled([refreshRuns(),document.querySelector('#view-logs').classList.contains('active')?refreshLogs():Promise.resolve()])}catch(e){if(/401|authentication/i.test(e.message)){adminKey='';sessionStorage.removeItem('shoob-admin-key');showLogin()}else{toast(e.message,'bad')}}finally{refreshBusy=false}}
+
 async function runSync(target,button){if(button)button.disabled=true;try{const d=await api('/api/admin/sync',{method:'POST',body:JSON.stringify({catalog:target})});toast(d.message||'Incremental check started');await refreshAll()}catch(e){toast(e.message,'bad')}finally{if(button)button.disabled=false}}
 document.querySelectorAll('[data-sync]').forEach(b=>b.addEventListener('click',()=>runSync(b.dataset.sync,b)));
 $('refreshBtn').onclick=refreshAll;$('catalogRefreshBtn').onclick=refreshAll;$('historyRefreshBtn').onclick=refreshRuns;$('logsRefreshBtn').onclick=refreshLogs;$('applyFilter').onclick=refreshLogs;$('searchLogs').addEventListener('keydown',e=>{if(e.key==='Enter')refreshLogs()});$('checkSourceBtn').onclick=()=>runSync('both',$('checkSourceBtn'));
-for(const fmt of ['Json','Html'])$('download'+fmt).onclick=async()=>{try{const p=new URLSearchParams({format:fmt.toLowerCase(),level:$('levelFilter').value,search:$('searchLogs').value});const r=await fetch('/api/admin/logs/download?'+p,{headers:{'x-admin-key':adminKey}});if(!r.ok)throw new Error('Log export failed');const blob=await r.blob();const u=URL.createObjectURL(blob);const a=document.createElement('a');a.href=u;a.download=`shoob-logs.${fmt.toLowerCase()}`;a.click();setTimeout(()=>URL.revokeObjectURL(u),1000);toast('Log export ready')}catch(e){toast(e.message,'bad')}};
-async function copyDiagnostics(){try{const snapshot=JSON.stringify(safeDiagnostics(lastStatus||{}),null,2);if(navigator.clipboard&&window.isSecureContext)await navigator.clipboard.writeText(snapshot);else{const ta=document.createElement('textarea');ta.value=snapshot;ta.style.position='fixed';ta.style.opacity='0';document.body.appendChild(ta);ta.select();const ok=document.execCommand('copy');ta.remove();if(!ok)throw new Error('Clipboard is unavailable; copy the snapshot from the Diagnostics view')}toast('Safe diagnostics copied')}catch(e){toast(e.message,'bad')}}
+
+for(const fmt of ['Json','Html'])$('download'+fmt).onclick=async()=>{try{const p=new URLSearchParams({format:fmt.toLowerCase(),level:$('levelFilter').value,search:$('searchLogs').value});const r=await fetch('/api/admin/logs/download?'+p,{headers:{'x-admin-key':adminKey}});if(!r.ok)throw new Error('Log export failed');const blob=await r.blob();const u=URL.createObjectURL(blob);const a=document.createElement('a');a.href=u;a.download=`zcard-logs.${fmt.toLowerCase()}`;a.click();setTimeout(()=>URL.revokeObjectURL(u),1000);toast('Log export ready')}catch(e){toast(e.message,'bad')}};
+
+async function copyDiagnostics(){try{const snapshot=JSON.stringify(safeDiagnostics(lastStatus||{}),null,2);if(navigator.clipboard&&window.isSecureContext)await navigator.clipboard.writeText(snapshot);else{const ta=document.createElement('textarea');ta.value=snapshot;ta.style.position='fixed';ta.style.opacity='0';document.body.appendChild(ta);ta.select();const ok=document.execCommand('copy');ta.remove();if(!ok)throw new Error('Clipboard is unavailable')}toast('Safe diagnostics copied')}catch(e){toast(e.message,'bad')}}
 ['copyDiagBtn','copyDiagBtn2','copyDiagBtn3'].forEach(id=>$(id).onclick=copyDiagnostics);
-// ===== Deleting logs & sync runs =====
+
 let deleteBusy=false,confirmResolve=null,confirmFocus=null;
 function confirmDialog({title,body,items=[],okLabel='Delete'}){
   return new Promise(resolve=>{
@@ -512,9 +443,7 @@ async function runDelete(o){
   if(!o.all&&!ids.length)return;
   const ok=await confirmDialog({
     title:o.all?`Delete all ${o.noun}s?`:`Delete ${ids.length} ${o.noun}${ids.length===1?'':'s'}?`,
-    body:o.all?o.allBody:o.body,
-    items:o.items,
-    okLabel:o.all?'Delete everything':`Delete ${ids.length}`
+    body:o.all?o.allBody:o.body, items:o.items, okLabel:o.all?'Delete everything':`Delete ${ids.length}`
   });
   if(!ok)return;
   const btn=o.all?o.allBtn:o.selBtn,label=btn.textContent;
@@ -532,14 +461,17 @@ async function runDelete(o){
 }
 const LOG_TARGETS=['Live log buffer on this server','Supabase · system_logs table (if available)'];
 const RUN_TARGETS=['Supabase · sync_runs table'];
-const logDel={sel:logSel,noun:'log',endpoint:'/api/admin/logs/delete',selBtn:$('logDeleteSel'),allBtn:$('logDeleteAll'),refresh:refreshLogs,items:LOG_TARGETS,body:'These logs will be permanently removed. This can’t be undone.',allBody:'This clears the whole log buffer and every row in system_logs, not just the logs shown. One audit entry will record the deletion.'};
-const runDel={sel:runSel,noun:'sync run',endpoint:'/api/admin/sync-runs/delete',selBtn:$('runDeleteSel'),allBtn:$('runDeleteAll'),refresh:refreshRuns,items:RUN_TARGETS,body:'These sync runs will be permanently removed from the history. Runs still in progress are kept.',allBody:'This removes every sync run from the history table, not just the 100 shown. Runs still in progress are kept.'};
+const logDel={sel:logSel,noun:'log',endpoint:'/api/admin/logs/delete',selBtn:$('logDeleteSel'),allBtn:$('logDeleteAll'),refresh:refreshLogs,items:LOG_TARGETS,body:'These logs will be permanently removed.',allBody:'This clears the whole log buffer and every row in system_logs.'};
+const runDel={sel:runSel,noun:'sync run',endpoint:'/api/admin/sync-runs/delete',selBtn:$('runDeleteSel'),allBtn:$('runDeleteAll'),refresh:refreshRuns,items:RUN_TARGETS,body:'These sync runs will be permanently removed.',allBody:'This removes every sync run from the history table.'};
 $('logDeleteSel').onclick=()=>runDelete({...logDel,all:false});
 $('logDeleteAll').onclick=()=>runDelete({...logDel,all:true});
 $('runDeleteSel').onclick=()=>runDelete({...runDel,all:false});
 $('runDeleteAll').onclick=()=>runDelete({...runDel,all:true});
 
-if(adminKey){showApp();refreshAll()}else showLogin();setInterval(()=>{if(adminKey)refreshAll()},5000);window.addEventListener('keydown',e=>{if(e.key==='Escape'){closeConfirm(false);openDrawer(false)}if(e.key==='Tab'&&confirmResolve){const f=[$('confirmCancel'),$('confirmOk')],i=f.indexOf(document.activeElement);e.preventDefault();f[(i+(e.shiftKey?-1:1)+2)%2].focus()}});
+if(adminKey){showApp();refreshAll()}else showLogin();
+setInterval(()=>{if(adminKey)refreshAll()},5000);
+window.addEventListener('keydown',e=>{if(e.key==='Escape'){closeConfirm(false);openDrawer(false)}if(e.key==='Tab'&&confirmResolve){const f=[$('confirmCancel'),$('confirmOk')],i=f.indexOf(document.activeElement);e.preventDefault();f[(i+(e.shiftKey?-1:1)+2)%2].focus()}});
+
 </script>
 </body>
 </html>
