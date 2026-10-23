@@ -1,3 +1,5 @@
+// stats-app.js  
+
 'use strict';
 (() => {
   const $ = id => document.getElementById(id);
@@ -243,7 +245,7 @@
   }
   function applyTheme() {
     const light=localStorage.getItem('shoob-control-room-theme')==='light';document.documentElement.classList.toggle('light-theme',light);
-    const b=$('themeToggle');if(b){b.textContent=light?'☾':'☼';b.title=light?'Switch to dark theme':'Switch to light theme';}
+    const b=$('themeToggle');if(b){b.textContent=light?'🌙':'☀️';b.title=light?'Switch to dark theme':'Switch to light theme';}
     if (Object.keys(charts).length) {
       // Rebuild charts with the updated axis and tooltip palette; data remains sourced from the current view.
       const summary=summarize(filteredRows(lastRows));const data=buildChartData(summary);
