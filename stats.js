@@ -1,4 +1,5 @@
-// stats.js
+// stats.js 
+
 'use strict';
 
 const LAGOS_TZ = 'Africa/Lagos';
@@ -310,8 +311,8 @@ function createStatsTracker({ getSupabase, logger }) {
           total: b.total,
           ok: b.ok,
           err: b.err,
-          avg_ms: b.total > 0 ? Math.round(b.ms_sum / b.total) : 0,
-          max_ms: b.ms_max,
+          avg_time: b.total > 0 ? `${Math.round(b.ms_sum / b.total)} ms` : '0 ms',
+          max_time: `${b.ms_max} ms`,
         }));
         if (successOnly) arr = arr.map(b => ({ ...b, total: b.ok }));
         else if (failedOnly) arr = arr.map(b => ({ ...b, total: b.err }));
@@ -320,8 +321,42 @@ function createStatsTracker({ getSupabase, logger }) {
         return arr;
       }
 
+      // Calculate summary totals
+      const today = lagosCalendar().day;
+      const currentWeek = lagosCalendar().week;
+      const currentMonth = lagosCalendar().month;
+
+      const totalToday = rows.filter(r => r.day === today).reduce((sum, r) => sum + r.total, 0);
+      const totalThisWeek = rows.filter(r => r.week === currentWeek).reduce((sum, r) => sum + r.total, 0);
+      const totalThisMonth = rows.filter(r => r.month === currentMonth).reduce((sum, r) => sum + r.total, 0);
+
+      // Calculate last N weeks/months totals
+      const getLastNWeeksTotal = (n) => {
+        const d = new Date();
+        d.setDate(d.getDate() - (n * 7));
+        const cal = lagosCalendar(d);
+        return rows.filter(r => r.week === cal.week).reduce((sum, r) => sum + r.total, 0);
+      };
+
+      const getLastNMonthsTotal = (n) => {
+        const d = new Date();
+        d.setMonth(d.getMonth() - n);
+        const cal = lagosCalendar(d);
+        return rows.filter(r => r.month === cal.month).reduce((sum, r) => sum + r.total, 0);
+      };
+
       const result = {
         ok: true,
+        summary: {
+          today: totalToday,
+          this_week: totalThisWeek,
+          last_2_weeks: getLastNWeeksTotal(2),
+          last_3_weeks: getLastNWeeksTotal(3),
+          this_month: totalThisMonth,
+          last_month: getLastNMonthsTotal(1),
+          last_2_months: getLastNMonthsTotal(2),
+          last_3_months: getLastNMonthsTotal(3),
+        },
         window: { months: 3, timezone: LAGOS_TZ },
         filters: {
           endpoint: endpoint || null,
@@ -331,6 +366,7 @@ function createStatsTracker({ getSupabase, logger }) {
           top: topN || null,
         },
         generatedAt: new Date().toISOString(),
+        details_below: 'Use daily, weekly, or monthly params to see detailed breakdown',
       };
       if (wantAll || wantDaily)   result.daily   = aggregate('day');
       if (wantAll || wantWeekly)  result.weekly  = aggregate('week');
@@ -387,6 +423,4 @@ function createStatsTracker({ getSupabase, logger }) {
 
 module.exports = { createStatsTracker };
 
-
-// end of stats.js 
 
