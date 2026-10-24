@@ -40,3 +40,13 @@
 @keyframes zcard-spin { to { transform:rotate(360deg); } }
 @media (max-width:390px) { .key-gate { padding-left:12px; padding-right:12px; } .key-card { border-radius:18px; } }
 @media (prefers-reduced-motion:reduce) { .busy-spinner { animation:none; } }
+
+
+/* Final frontend hardening: coherent theme transitions and mobile safety */
+html,body,.glass,.metric-card,.chart-card,.insight-card,.filter-panel,.studio-chart,.studio-meta,.topbar,.icon-btn,.top-back,.field-wrap input,.endpoint-input-wrap,.preset,.subtle-btn,.apply-btn,.search-btn,.toast{transition:background-color .22s ease,border-color .22s ease,color .22s ease,box-shadow .22s ease}
+.light-theme{color-scheme:light}
+.table-scroll{overscroll-behavior-inline:contain;-webkit-overflow-scrolling:touch}
+.studio-meta{overflow-wrap:anywhere}
+@media(max-width:720px){.studio-head{align-items:flex-start;flex-direction:column;gap:16px}.studio-tools{width:100%}.studio-tools button{flex:1}.studio-meta{align-items:flex-start;display:flex;flex-direction:column;gap:8px}.studio-canvas{height:min(68vh,520px);min-height:280px}.studio-legend{flex-wrap:wrap;gap:8px}.endpoint-cell{max-width:220px;overflow:hidden;text-overflow:ellipsis}}
+@media(prefers-reduced-motion:reduce){html,body,.glass,.metric-card,.chart-card,.insight-card,.filter-panel,.studio-chart,.studio-meta,.topbar,.icon-btn,.top-back,.field-wrap input,.endpoint-input-wrap,.preset,.subtle-btn,.apply-btn,.search-btn,.toast{transition:none!important}}
+.metric-spark,.latency-visual{display:none}

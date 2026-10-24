@@ -27,16 +27,18 @@
   let lastDataStamp = '';
   let activeWindow = null;
   let toastTimer;
+  const LAGOS_TZ = 'Africa/Lagos';
+  const REFRESH_MS = 15000;
 
   function toast(message, kind='good') {
     const el = $('toast'); if (!el) return;
     el.textContent = message; el.className = `toast show ${kind}`;
     clearTimeout(toastTimer); toastTimer = setTimeout(() => { el.className = 'toast'; }, 3600);
   }
-  function dateISO(date) { return `${date.getFullYear()}-${String(date.getMonth()+1).padStart(2,'0')}-${String(date.getDate()).padStart(2,'0')}`; }
-  function startOfWeek(date) { const d = new Date(date); const dow = (d.getDay()+6)%7; d.setDate(d.getDate()-dow); d.setHours(0,0,0,0); return d; }
-  function minAllowedDate() { const d = new Date(); d.setDate(1); d.setMonth(d.getMonth()-2); d.setHours(0,0,0,0); return d; }
-  function today() { const d = new Date(); d.setHours(0,0,0,0); return d; }
+  function dateISO(date) { return `${date.getUTCFullYear()}-${String(date.getUTCMonth()+1).padStart(2,'0')}-${String(date.getUTCDate()).padStart(2,'0')}`; }
+  function today() { const parts=Object.fromEntries(new Intl.DateTimeFormat('en-CA',{timeZone:LAGOS_TZ,year:'numeric',month:'2-digit',day:'2-digit'}).formatToParts(new Date()).filter(p=>p.type!=='literal').map(p=>[p.type,p.value])); return new Date(`${parts.year}-${parts.month}-${parts.day}T12:00:00Z`); }
+  function startOfWeek(date) { const d=new Date(Date.UTC(date.getUTCFullYear(),date.getUTCMonth(),date.getUTCDate(),12)); const dow=(d.getUTCDay()+6)%7; d.setUTCDate(d.getUTCDate()-dow); return d; }
+  function minAllowedDate() { const d=today(); d.setUTCDate(1); d.setUTCMonth(d.getUTCMonth()-2); return d; }
   function dateWindow() {
     if (!$('dateFrom') || !$('dateTo')) return activeWindow || {from:dateISO(today()),to:dateISO(today())};
     const end = $('dateTo').value || dateISO(today());
@@ -95,9 +97,9 @@
     $('filterSummary').textContent = `${ep} · ${label}`;
   }
   async function getJson(url) {
-    const join = url.includes('?') ? '&' : '?';
-    const full = apiKey ? `${url}${join}key=${encodeURIComponent(apiKey)}` : url;
-    const res = await fetch(full,{cache:'no-store',headers:{'Accept':'application/json'}});
+    const headers={'Accept':'application/json'};
+    if(apiKey) headers['x-admin-key']=apiKey;
+    const res = await fetch(url,{cache:'no-store',headers});
     let data={}; try { data=await res.json(); } catch {}
     if (!res.ok) throw new Error(data.error || `Request failed (${res.status})`);
     return data;
@@ -226,7 +228,7 @@
       }
       const now=new Date();const stamp=now.toLocaleTimeString([], {hour:'2-digit',minute:'2-digit',second:'2-digit'});
       if($('lastUpdated')) $('lastUpdated').textContent=`Updated ${stamp}`;
-      if($('footerState')) $('footerState').textContent='Data connected · refresh every 5s';
+      if($('footerState')) $('footerState').textContent=`Data connected · refresh every ${REFRESH_MS/1000}s`;
       if($('requestFoot')) $('requestFoot').textContent=`${dateWindow().from} → ${dateWindow().to}`;
       const newStamp=`${summary.total}:${summary.ok}:${summary.err}`; if(lastDataStamp&&newStamp!==lastDataStamp&&$('liveLabel')) $('liveLabel').textContent='DATA UPDATED'; else if($('liveLabel')) $('liveLabel').textContent='LIVE MONITOR';lastDataStamp=newStamp;
     } catch(e) {
@@ -235,7 +237,7 @@
       else toast(e.message,'error');
     } finally {refreshing=false;}
   }
-  function startRefresh() {clearInterval(refreshTimer);void refreshData();refreshTimer=setInterval(()=>void refreshData(),5000);}
+  function startRefresh() {clearInterval(refreshTimer);refreshTimer=null;if(document.hidden)return;void refreshData();refreshTimer=setInterval(()=>void refreshData(),REFRESH_MS);}
   function showKeyGate(message='Enter your API key to access protected statistics.') {
     if($('keyGate')) $('keyGate').remove();
     const overlay=document.createElement('div');overlay.id='keyGate';overlay.className='key-gate';
@@ -270,6 +272,7 @@
   function init() {
     if(window.Chart && window.ChartZoom) Chart.register(window.ChartZoom);
     $('themeToggle')?.addEventListener('click',()=>{const light=!document.documentElement.classList.contains('light-theme');localStorage.setItem('shoob-control-room-theme',light?'light':'dark');applyTheme();});
+    document.addEventListener('visibilitychange',()=>{if(document.hidden){clearInterval(refreshTimer);refreshTimer=null;}else if(apiKey){startRefresh();}});
     applyTheme();
     $('refreshNow')?.addEventListener('click',()=>void refreshData());
     $('zoomReset')?.addEventListener('click',()=>charts.studioChart?.resetZoom());
