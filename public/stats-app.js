@@ -97,9 +97,11 @@
     $('filterSummary').textContent = `${ep} · ${label}`;
   }
   async function getJson(url) {
+    const join = url.includes('?') ? '&' : '?';
+    const full = apiKey ? `${url}${join}key=${encodeURIComponent(apiKey)}` : url;
     const headers={'Accept':'application/json'};
     if(apiKey) headers['x-admin-key']=apiKey;
-    const res = await fetch(url,{cache:'no-store',headers});
+    const res = await fetch(full,{cache:'no-store',headers});
     let data={}; try { data=await res.json(); } catch {}
     if (!res.ok) throw new Error(data.error || `Request failed (${res.status})`);
     return data;
