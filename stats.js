@@ -23,12 +23,18 @@ const ROUTE_PARAMS = {
                               'success', 'failed', 'top'],
                       enumVals: ['method'] },
   '/api/stats/recent': { keys: ['limit'], enumVals: [] },
+  '/api/link':      { keys: ['url'], enumVals: [] },   // key-only: the Shoob URL itself is never stored
   '/api/status':    { keys: [], enumVals: [] },
   '/api/endpoints': { keys: [], enumVals: [] },
   '/api/endpoint':  { keys: [], enumVals: [] },
 };
 
-const SKIP_PATHS = new Set(['/api/health', '/ping']);
+// Health checks and the analytics endpoints themselves (the dashboard polls /api/stats
+// every few seconds, which would otherwise inflate your own numbers).
+const SKIP_PATHS = new Set(['/api/health', '/ping', '/api/stats', '/api/stats/recent']);
+// Any /api/* path that is not a documented route (bot scans, typos) is folded into this
+// single bucket so unknown paths can't create unlimited rows.
+const OTHER_PATH = '/api/_other';
 const MAX_PENDING_BUCKETS = 2000;
 const FLUSH_MS = 60_000;
 const PRUNE_MS = 6 * 60 * 60 * 1000; // 6 hours
@@ -49,6 +55,27 @@ function lagosCalendar(date = new Date()) {
   const sundayUtc = new Date(Date.UTC(Number(o.year), Number(o.month) - 1, Number(o.day) - dow));
   const week = sundayUtc.toISOString().slice(0, 10);
   return { day, week, month };
+}
+
+// Normalise a request path for bucketing: lower-case, no trailing slash.
+// (Express routing is case-insensitive and ignores trailing slashes by default.)
+function normalizePath(p) {
+  const s = String(p || '').toLowerCase().replace(/\/+$/, '');
+  return s || '/';
+}
+
+// Shift a week key (the Sunday's YYYY-MM-DD in Lagos) by whole weeks.
+function shiftWeek(week, delta) {
+  const d = new Date(`${week}T00:00:00Z`);
+  d.setUTCDate(d.getUTCDate() + delta * 7);
+  return d.toISOString().slice(0, 10);
+}
+
+// Shift a 'YYYY-MM' key by whole months with integer math (no Date day-overflow bugs).
+function shiftMonth(month, delta) {
+  const [y, m] = month.split('-').map(Number);
+  const idx = y * 12 + (m - 1) + delta;
+  return `${Math.floor(idx / 12)}-${String((idx % 12) + 1).padStart(2, '0')}`;
 }
 
 // ---------- Param signature builder ----------
@@ -104,7 +131,8 @@ function sanitizeStatsRow(row) {
   return { ...row, path, param_sig: safeParamSig(row.param_sig) };
 }
 
-function isExcludedAnalyticsPath(path) {
+function isExcludedAnalyticsPath(rawPath) {
+  const path = normalizePath(rawPath);
   return path === '/api/health' || path === '/ping' ||
     path === '/api/admin' || path.startsWith('/api/admin/') ||
     path === '/api/internal' || path.startsWith('/api/internal/');
@@ -139,11 +167,12 @@ function createStatsTracker({ getSupabase, logger }) {
   // ---------- Middleware: records after response finishes ----------
 
   function middleware(req, res, next) {
-    if (!req.path.startsWith('/api/')) return next();
-    if (SKIP_PATHS.has(req.path)) return next();
+    const p = normalizePath(req.path);
+    if (!p.startsWith('/api/')) return next();
+    if (SKIP_PATHS.has(p)) return next();
     // Administrative and internal endpoints can contain sensitive operational data.
-    if (req.path === '/api/admin' || req.path.startsWith('/api/admin/') ||
-        req.path === '/api/internal' || req.path.startsWith('/api/internal/')) return next();
+    if (p === '/api/admin' || p.startsWith('/api/admin/') ||
+        p === '/api/internal' || p.startsWith('/api/internal/')) return next();
     const ua = req.get('user-agent') || '';
     if (/ZCard-Control-Room-self-ping/i.test(ua)) return next();
 
@@ -158,8 +187,9 @@ function createStatsTracker({ getSupabase, logger }) {
   }
 
   function record(req, res, ms) {
-    const routeInfo = ROUTE_PARAMS[req.path];
-    const path = req.path;
+    const normalized = normalizePath(req.path);
+    const routeInfo = ROUTE_PARAMS[normalized];
+    const path = routeInfo ? normalized : OTHER_PATH;
     const paramSig = routeInfo ? buildParamSig(req.query || {}, routeInfo) : '';
     const cal = lagosCalendar();
     const method = req.method;
@@ -256,7 +286,7 @@ function createStatsTracker({ getSupabase, logger }) {
     try {
       const { error, count } = await sb
         .from('endpoint_stats')
-        .delete()
+        .delete({ count: 'exact' })
         .lt('day', cutoffDay);
       if (error) throw error;
       state.prune.lastSuccessAt = new Date().toISOString();
@@ -294,7 +324,13 @@ function createStatsTracker({ getSupabase, logger }) {
       for (let offset = 0; ; offset += PAGE_SIZE) {
         let pageQuery = sb.from('endpoint_stats').select(
           'day, week, month, method, path, param_sig, total, ok, err, ms_sum, ms_max'
-        ).range(offset, offset + PAGE_SIZE - 1);
+        )
+          // A stable order is required for range() paging; otherwise rows can repeat or be skipped.
+          .order('day', { ascending: true })
+          .order('method', { ascending: true })
+          .order('path', { ascending: true })
+          .order('param_sig', { ascending: true })
+          .range(offset, offset + PAGE_SIZE - 1);
         if (method) pageQuery = pageQuery.eq('method', method);
         // If endpoint is just a path (no '?'), filter in the database.
         if (endpoint && !endpoint.includes('?')) pageQuery = pageQuery.eq('path', endpoint);
@@ -374,28 +410,24 @@ function createStatsTracker({ getSupabase, logger }) {
         return arr;
       }
 
-      // Calculate summary totals
-      const today = lagosCalendar().day;
-      const currentWeek = lagosCalendar().week;
-      const currentMonth = lagosCalendar().month;
+      // Calculate summary totals (all Lagos calendar based)
+      const cal = lagosCalendar();
+      const sumWhere = pred => rows.filter(pred).reduce((sum, r) => sum + r.total, 0);
 
-      const totalToday = rows.filter(r => r.day === today).reduce((sum, r) => sum + r.total, 0);
-      const totalThisWeek = rows.filter(r => r.week === currentWeek).reduce((sum, r) => sum + r.total, 0);
-      const totalThisMonth = rows.filter(r => r.month === currentMonth).reduce((sum, r) => sum + r.total, 0);
+      const totalToday = sumWhere(r => r.day === cal.day);
+      const totalThisWeek = sumWhere(r => r.week === cal.week);
+      const totalThisMonth = sumWhere(r => r.month === cal.month);
 
-      // Calculate last N weeks/months totals
-      const getLastNWeeksTotal = (n) => {
-        const d = new Date();
-        d.setDate(d.getDate() - (n * 7));
-        const cal = lagosCalendar(d);
-        return rows.filter(r => r.week === cal.week).reduce((sum, r) => sum + r.total, 0);
+      // "last N" = the N most recent COMPLETED weeks/months, not counting the current one.
+      const lastNWeeksTotal = n => {
+        const keys = new Set();
+        for (let i = 1; i <= n; i++) keys.add(shiftWeek(cal.week, -i));
+        return sumWhere(r => keys.has(r.week));
       };
-
-      const getLastNMonthsTotal = (n) => {
-        const d = new Date();
-        d.setMonth(d.getMonth() - n);
-        const cal = lagosCalendar(d);
-        return rows.filter(r => r.month === cal.month).reduce((sum, r) => sum + r.total, 0);
+      const lastNMonthsTotal = n => {
+        const keys = new Set();
+        for (let i = 1; i <= n; i++) keys.add(shiftMonth(cal.month, -i));
+        return sumWhere(r => keys.has(r.month));
       };
 
       const result = {
@@ -403,13 +435,14 @@ function createStatsTracker({ getSupabase, logger }) {
         summary: {
           today: totalToday,
           this_week: totalThisWeek,
-          last_2_weeks: getLastNWeeksTotal(2),
-          last_3_weeks: getLastNWeeksTotal(3),
+          last_2_weeks: lastNWeeksTotal(2),
+          last_3_weeks: lastNWeeksTotal(3),
           this_month: totalThisMonth,
-          last_month: getLastNMonthsTotal(1),
-          last_2_months: getLastNMonthsTotal(2),
-          last_3_months: getLastNMonthsTotal(3),
+          last_month: lastNMonthsTotal(1),
+          last_2_months: lastNMonthsTotal(2),
+          last_3_months: lastNMonthsTotal(3),
         },
+        summary_note: 'last_N_weeks / last_N_months add up the N most recent completed weeks/months (the current one is not included). Only about 3 calendar months of history are kept, so last_3_months can be partial.',
         window: { months: 3, timezone: LAGOS_TZ },
         filters: {
           endpoint: endpoint ? safePath(endpoint) : null,

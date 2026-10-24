@@ -228,7 +228,10 @@ function requireInternalOrAdmin(req, res, next) {
 
 // --- API Key Protection Middleware ---
 function requireApiKey(req, res, next) {
-  const providedKey = req.query.key ? String(req.query.key) : '';
+  // Key may come from ?key=..., or from the x-api-key / x-admin-key headers (keeps it out of URLs/logs).
+  const providedKey = req.query.key
+    ? String(req.query.key)
+    : String(req.get('x-api-key') || req.get('x-admin-key') || '');
 
   if (!providedKey) {
     req.skipStatsTracking = true;
@@ -243,7 +246,7 @@ function requireApiKey(req, res, next) {
     : [];
   
   const adminKey = process.env.ADMIN_KEY;
-  const isValidApiKey = validApiKeys.includes(providedKey);
+  const isValidApiKey = validApiKeys.some(k => safeEqual(providedKey, k));
   const isAdminKey = adminKey ? safeEqual(providedKey, adminKey) : false;
 
   if (isValidApiKey || isAdminKey) {
@@ -928,6 +931,195 @@ app.get('/api/series', requireApiKey, async (req, res) => {
   }
 });
 
+// -----------------------------------------------------------------------------
+// GET /api/link — resolve a Shoob card link to its final CDN media URL
+// BEGIN /api/link
+// -----------------------------------------------------------------------------
+
+const SHOOB_API_HOST = 'api.shoob.gg';
+const SHOOB_PAGE_HOSTS = new Set(['shoob.gg', 'www.shoob.gg']);
+const SHOOB_MEDIA_HOSTS = new Set(['cdn.shoob.gg']); // hosts we accept as the final file location
+const SHOOB_CARD_ID_RE = /^[0-9a-f]{24}$/i;
+const SHOOB_CARDR_PATH_RE = /^\/site\/api\/cardr\/([0-9a-f]{24})\/?$/i;
+const LINK_TIMEOUT_MS = 10_000;
+const LINK_CACHE_TTL_MS = 10 * 60 * 1000;
+const LINK_CACHE_MAX = 500;
+const LINK_RATE_WINDOW_MS = 60_000;
+const LINK_RATE_MAX = 30; // uncached lookups per IP per minute (protects your server's IP with Shoob)
+const LINK_USER_AGENT = 'Mozilla/5.0 (compatible; ZCard-Control-Room/1.0)';
+
+const LINK_MEDIA_TYPES = {
+  mp4: { media: 'video', mime: 'video/mp4' },
+  webm: { media: 'video', mime: 'video/webm' },
+  gif: { media: 'image', mime: 'image/gif' },
+  png: { media: 'image', mime: 'image/png' },
+  jpg: { media: 'image', mime: 'image/jpeg' },
+  jpeg: { media: 'image', mime: 'image/jpeg' },
+  webp: { media: 'image', mime: 'image/webp' },
+};
+
+const linkCache = new Map(); // "<id>|<size>" -> { value, expires }
+const linkRate = new Map();  // ip -> { count, resetAt }
+
+function linkError(status, message) {
+  const err = new Error(message);
+  err.status = status;
+  return err;
+}
+
+// Strictly parse a user-supplied Shoob URL. Returns null when it is not one.
+// The host is compared EXACTLY after URL parsing, so lookalikes such as
+// https://shoob.gg.evil.com, https://evil.com/?shoob.gg or https://shoob.gg@evil.com all fail.
+// The outgoing request is always rebuilt from the validated pieces, never from the raw input.
+function parseShoobUrl(raw) {
+  if (typeof raw !== 'string') return null;
+  const input = raw.trim();
+  if (!input || input.length > 2048) return null;
+  let u;
+  try { u = new URL(input); } catch { return null; }
+  if (u.protocol !== 'https:' && u.protocol !== 'http:') return null;
+  if (u.username || u.password || u.port) return null;
+  const host = u.hostname.toLowerCase();
+
+  if (host === SHOOB_API_HOST) {
+    const m = SHOOB_CARDR_PATH_RE.exec(u.pathname);
+    if (!m) return null;
+    const sizeRaw = u.searchParams.get('size');
+    const size = sizeRaw && /^\d{1,4}$/.test(sizeRaw) && Number(sizeRaw) > 0 ? Number(sizeRaw) : null;
+    return { kind: 'card', id: m[1].toLowerCase(), size };
+  }
+  if (SHOOB_PAGE_HOSTS.has(host)) {
+    const id = u.pathname.split('/').find(seg => SHOOB_CARD_ID_RE.test(seg));
+    if (!id) return null;
+    return { kind: 'card', id: id.toLowerCase(), size: null };
+  }
+  if (SHOOB_MEDIA_HOSTS.has(host)) {
+    return { kind: 'media', url: `https://${host}${u.pathname}${u.search}` };
+  }
+  return null;
+}
+
+function describeMedia(mediaUrl) {
+  const m = /\.([a-z0-9]{2,5})$/i.exec(new URL(mediaUrl).pathname);
+  const ext = m ? m[1].toLowerCase() : null;
+  const info = ext ? LINK_MEDIA_TYPES[ext] : null;
+  return { type: ext || 'unknown', media: info ? info.media : 'unknown', mime: info ? info.mime : null };
+}
+
+function linkCacheGet(key) {
+  const hit = linkCache.get(key);
+  if (!hit) return null;
+  if (hit.expires <= Date.now()) { linkCache.delete(key); return null; }
+  return hit.value;
+}
+
+function linkCacheSet(key, value) {
+  if (linkCache.size >= LINK_CACHE_MAX) linkCache.delete(linkCache.keys().next().value);
+  linkCache.set(key, { value, expires: Date.now() + LINK_CACHE_TTL_MS });
+}
+
+// Returns 0 when allowed, otherwise the number of seconds to wait.
+function linkRateCheck(ip) {
+  const now = Date.now();
+  if (linkRate.size > 2000) {
+    for (const [k, v] of linkRate) if (v.resetAt <= now) linkRate.delete(k);
+  }
+  const entry = linkRate.get(ip);
+  if (!entry || entry.resetAt <= now) {
+    linkRate.set(ip, { count: 1, resetAt: now + LINK_RATE_WINDOW_MS });
+    return 0;
+  }
+  if (entry.count >= LINK_RATE_MAX) return Math.max(1, Math.ceil((entry.resetAt - now) / 1000));
+  entry.count += 1;
+  return 0;
+}
+
+// Ask Shoob where a card image lives. Redirects are NOT followed: we only read the
+// Location header (like `curl` without -L) and never download the image.
+async function resolveShoobCard(id, size) {
+  const target = `https://${SHOOB_API_HOST}/site/api/cardr/${id}${size ? `?size=${size}` : ''}`;
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), LINK_TIMEOUT_MS);
+  try {
+    const response = await fetch(target, {
+      method: 'GET',
+      redirect: 'manual',
+      signal: controller.signal,
+      headers: { 'user-agent': LINK_USER_AGENT, accept: '*/*' },
+    });
+    try { await response.body?.cancel(); } catch { /* ignore */ }
+
+    if (response.status >= 300 && response.status < 400) {
+      const location = response.headers.get('location');
+      if (!location) throw linkError(502, 'Shoob redirected without a target');
+      let finalUrl;
+      try { finalUrl = new URL(location, target); } catch { throw linkError(502, 'Shoob returned an invalid redirect'); }
+      if (finalUrl.protocol !== 'https:' || finalUrl.username || finalUrl.password || finalUrl.port ||
+          !SHOOB_MEDIA_HOSTS.has(finalUrl.hostname.toLowerCase())) {
+        throw linkError(502, 'Shoob redirected to an unexpected host');
+      }
+      return finalUrl.toString();
+    }
+    if (response.status === 404) throw linkError(404, 'Card not found on Shoob');
+    if (response.status === 200) throw linkError(502, 'Shoob did not return a redirect');
+    throw linkError(502, `Shoob responded with HTTP ${response.status}`);
+  } catch (error) {
+    if (error && error.status) throw error;
+    if (error && error.name === 'AbortError') throw linkError(504, 'Shoob request timed out');
+    throw linkError(502, 'Could not reach Shoob');
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+app.get('/api/link', requireApiKey, async (req, res) => {
+  const startTime = Date.now();
+  const base = () => ({ durationMs: Date.now() - startTime, timestamps: getTimestamps() });
+
+  if (req.query.url === undefined || req.query.url === '') {
+    return res.status(400).json({ ok: false, error: 'Missing url parameter', usage: '/api/link?url=SHOOB_URL&key=YOUR_KEY', ...base() });
+  }
+  const parsed = parseShoobUrl(req.query.url);
+  if (!parsed) {
+    return res.status(400).json({ ok: false, error: 'Invalid Shoob URL', ...base() });
+  }
+
+  try {
+    let mediaUrl;
+    let cardId = null;
+    let cached = false;
+
+    if (parsed.kind === 'media') {
+      mediaUrl = parsed.url; // already the final CDN file
+    } else {
+      cardId = parsed.id;
+      const cacheKey = `${parsed.id}|${parsed.size || ''}`;
+      const hit = linkCacheGet(cacheKey);
+      if (hit) {
+        mediaUrl = hit;
+        cached = true;
+      } else {
+        const wait = linkRateCheck(req.ip || 'unknown');
+        if (wait) {
+          res.set('Retry-After', String(wait));
+          return res.status(429).json({ ok: false, error: 'Too many link lookups. Try again shortly.', retry_after_seconds: wait, ...base() });
+        }
+        mediaUrl = await resolveShoobCard(parsed.id, parsed.size);
+        linkCacheSet(cacheKey, mediaUrl);
+      }
+    }
+
+    const info = describeMedia(mediaUrl);
+    return res.json({ ok: true, card_id: cardId, type: info.type, media: info.media, mime: info.mime, url: mediaUrl, cached, ...base() });
+  } catch (error) {
+    const status = error && error.status ? error.status : 502;
+    const message = error && error.status ? error.message : 'Link lookup failed';
+    return res.status(status).json({ ok: false, error: message, ...base() });
+  }
+});
+
+// END /api/link
+
 app.get('/api/admin/catalog', requireAdmin, async (req, res) => {
   if (!supabase) return res.status(503).json({ ok: false, error: 'Supabase not configured' });
   const { data, error } = await supabase.from('catalog_state').select('*').order('catalog');
@@ -944,7 +1136,7 @@ const PUBLIC_ENDPOINT_DIRECTORY = {
   service: 'ZCard Control Room',
   documentation: {
     queryRules: [
-      'Endpoints ( /api/cards, /api/events, /api/random, /api/series, /api/stats, /api/stats/recent ) require a valid API key.',
+      'Endpoints ( /api/cards, /api/events, /api/random, /api/series, /api/link, /api/stats, /api/stats/recent ) require a valid API key.',
       'Add your key to the end of the URL e.g  ?key=YOUR_API_KEY',
       'Use "?" before the first query parameter.',
       'Use & between additional query parameters.',
@@ -958,7 +1150,8 @@ const PUBLIC_ENDPOINT_DIRECTORY = {
       'tier is an exact tier filter.',
       'sort must be an allowed column for that endpoint.',
       'order accepts "asc" or "desc" (default asc).',
-      'Requesting a page beyond the last page returns ok:true with an empty data array, not an error.'
+      'Requesting a page beyond the last page returns ok:true with an empty data array, not an error.',
+      'For /api/link, url must be a Shoob link (api.shoob.gg card link, a shoob.gg card page link containing the card id, or a cdn.shoob.gg file link). Anything else returns \"Invalid Shoob URL\".'
     ],
   },
   endpoints: [
@@ -975,6 +1168,11 @@ const PUBLIC_ENDPOINT_DIRECTORY = {
       method: 'GET', path: '/api/series', description: 'Dictionary of all anime series and counts.', 
       parameters: { key: 'Required API key (or Admin key).', event: 'Optional event slug.' }, 
       examples: ['/api/series?key=YOUR_KEY', '/api/series?event=summer&key=YOUR_KEY'] 
+    },
+    {
+      method: 'GET', path: '/api/link', description: 'Resolves a Shoob card link to its final media file URL (mp4, gif, jpg, png, webp).',
+      parameters: { key: 'Required API key (or Admin key).', url: 'Required. Shoob link, e.g. https://api.shoob.gg/site/api/cardr/CARD_ID?size=700' },
+      examples: ['/api/link?url=https://api.shoob.gg/site/api/cardr/CARD_ID?size=700&key=YOUR_KEY']
     },
     { 
       method: 'GET', path: '/api/stats', description: 'API usage analytics.', 
