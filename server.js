@@ -231,6 +231,7 @@ function requireApiKey(req, res, next) {
   const providedKey = req.query.key ? String(req.query.key) : '';
 
   if (!providedKey) {
+    req.skipStatsTracking = true;
     return res.status(401).json({
       ok: false,
       error: 'Your API key is required. add  &key=YOUR_KEY to the URL.'
@@ -249,6 +250,7 @@ function requireApiKey(req, res, next) {
     return next();
   }
 
+  req.skipStatsTracking = true;
   return res.status(403).json({
     ok: false,
     error: 'Invalid API key.'

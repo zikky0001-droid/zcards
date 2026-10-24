@@ -80,9 +80,10 @@ const SENSITIVE_QUERY_KEYS = new Set([
 
 function safePath(value) {
   const raw = String(value || '');
-  const sensitiveSuffix = /[?&](?:key|api_key|apikey|token|access_token|refresh_token|authorization|auth|secret|password|client_secret)=/i;
-  const match = sensitiveSuffix.exec(raw);
-  if (match) return raw.slice(0, match.index);
+  // Any credential-like query fragment in a stored path means the row is malformed
+  // or was recorded by an older version. Do not expose or merge it into a valid route.
+  const sensitiveSuffix = /(?:[?&]|m)(?:key|api_key|apikey|token|access_token|refresh_token|authorization|auth|secret|password|client_secret)=/i;
+  if (sensitiveSuffix.test(raw)) return null;
   return raw.split('?', 1)[0];
 }
 
@@ -98,7 +99,9 @@ function safeParamSig(value) {
 }
 
 function sanitizeStatsRow(row) {
-  return { ...row, path: safePath(row.path), param_sig: safeParamSig(row.param_sig) };
+  const path = safePath(row.path);
+  if (!path) return null;
+  return { ...row, path, param_sig: safeParamSig(row.param_sig) };
 }
 
 function isExcludedAnalyticsPath(path) {
@@ -146,6 +149,8 @@ function createStatsTracker({ getSupabase, logger }) {
 
     const start = Date.now();
     res.on('finish', () => {
+      // Do not include requests explicitly rejected by API-key authentication.
+      if (req.skipStatsTracking) return;
       try { record(req, res, Date.now() - start); }
       catch (e) { /* never break the response */ }
     });
@@ -299,7 +304,7 @@ function createStatsTracker({ getSupabase, logger }) {
         if (!page || page.length < PAGE_SIZE) break;
       }
 
-      let rows = (data || []).map(sanitizeStatsRow).filter(row => !isExcludedAnalyticsPath(row.path));
+      let rows = (data || []).map(sanitizeStatsRow).filter(row => row && !isExcludedAnalyticsPath(row.path));
 
       // Post-filter if endpoint contained a query string
       if (endpoint && endpoint.includes('?')) {
@@ -460,7 +465,7 @@ function createStatsTracker({ getSupabase, logger }) {
 
       if (error) throw error;
 
-      const rows = (data || []).map(sanitizeStatsRow).filter(row => !isExcludedAnalyticsPath(row.path));
+      const rows = (data || []).map(sanitizeStatsRow).filter(row => row && !isExcludedAnalyticsPath(row.path));
       const hasMore = rows.length > limit;
       const recent = rows.slice(0, limit).map(row => ({
         ...row,
