@@ -1,3 +1,5 @@
+// stats-app.js  
+
 'use strict';
 (() => {
   const $ = id => document.getElementById(id);
@@ -190,7 +192,7 @@
     if(!summary.total){$('insightTitle').textContent='No signal in this window';$('insightText').textContent='No stored API requests match the selected dates and endpoint filters. Try a wider date range or clear the endpoint filter.';return;}
     if(rate<95){$('insightTitle').textContent='Reliability needs a closer look';$('insightText').textContent=`${(100-rate).toFixed(1)}% of recorded requests failed in this window. Check the endpoint leaderboard for routes contributing the most failures.`;}
     else if(summary.avg>500){$('insightTitle').textContent='Latency is running high';$('insightText').textContent=`Weighted average latency is ${Math.round(summary.avg)} ms. Compare route-level averages and peak observations to locate slower paths.`;}
-    else {$('insightTitle').textContent='Telemetry looks steady';$('insightText').textContent=`${fmt(summary.total)} requests were recorded with a ${rate.toFixed(1)}% success rate. Keep an eye on the live traffic waveform for changes.`;}
+    else {$('insightTitle').textContent='Data looks steady';$('insightText').textContent=`${fmt(summary.total)} requests were recorded with a ${rate.toFixed(1)}% success rate. Keep an eye on the live traffic waveform for changes.`;}
   }
   function updateChartLinks() {
     const range=dateWindow();const endpoints=endpointApplied?selectedEndpoints.join(','):'';
@@ -224,11 +226,11 @@
       }
       const now=new Date();const stamp=now.toLocaleTimeString([], {hour:'2-digit',minute:'2-digit',second:'2-digit'});
       if($('lastUpdated')) $('lastUpdated').textContent=`Updated ${stamp}`;
-      if($('footerState')) $('footerState').textContent='Telemetry connected · refresh every 5s';
+      if($('footerState')) $('footerState').textContent='Data connected · refresh every 5s';
       if($('requestFoot')) $('requestFoot').textContent=`${dateWindow().from} → ${dateWindow().to}`;
-      const newStamp=`${summary.total}:${summary.ok}:${summary.err}`; if(lastDataStamp&&newStamp!==lastDataStamp&&$('liveLabel')) $('liveLabel').textContent='SIGNAL UPDATED'; else if($('liveLabel')) $('liveLabel').textContent='LIVE MONITOR';lastDataStamp=newStamp;
+      const newStamp=`${summary.total}:${summary.ok}:${summary.err}`; if(lastDataStamp&&newStamp!==lastDataStamp&&$('liveLabel')) $('liveLabel').textContent='DATA UPDATED'; else if($('liveLabel')) $('liveLabel').textContent='LIVE MONITOR';lastDataStamp=newStamp;
     } catch(e) {
-      if($('footerState')) $('footerState').textContent='Telemetry unavailable';
+      if($('footerState')) $('footerState').textContent='Data unavailable';
       if(/401|403/.test(e.message)) { clearInterval(refreshTimer); showKeyGate('The API key was rejected. Enter a valid API key to continue.'); }
       else toast(e.message,'error');
     } finally {refreshing=false;}
@@ -237,13 +239,27 @@
   function showKeyGate(message='Enter your API key to access protected statistics.') {
     if($('keyGate')) $('keyGate').remove();
     const overlay=document.createElement('div');overlay.id='keyGate';overlay.className='key-gate';
-    overlay.innerHTML=`<form class="key-card"><div class="brand-mark">Z<span>✦</span></div><div class="section-kicker">AUTHENTICATED TELEMETRY</div><h2>Unlock Stats <span>Centre</span></h2><p>${esc(message)}</p><label for="statsKey">API key / admin key</label><input id="statsKey" type="password" autocomplete="current-password" placeholder="Paste your key" required><button class="apply-btn" type="submit">Unlock analytics ↗</button><a href="/">Return to Control Room</a><small>Your key is stored in this browser tab's session storage only.</small></form>`;
+    overlay.setAttribute('role','dialog');overlay.setAttribute('aria-modal','true');overlay.setAttribute('aria-labelledby','keyGateTitle');
+    overlay.innerHTML=`<form class="key-card"><div class="brand-mark">Z<span>✦</span></div><div class="section-kicker">🔐 PROTECTED DATA</div><h2 id="keyGateTitle">Unlock Stats <span>Centre</span></h2><p>${esc(message)}</p><label for="statsKey">API key / admin key</label><input id="statsKey" type="password" autocomplete="current-password" placeholder="Paste your key" required><button class="apply-btn" type="submit">Unlock analytics ↗</button><a href="/">↩ Return to Control Room</a></form>`;
     document.body.appendChild(overlay);
-    overlay.querySelector('form').addEventListener('submit',e=>{e.preventDefault();apiKey=overlay.querySelector('#statsKey').value.trim();if(!apiKey)return;sessionStorage.setItem('shoob-admin-key',apiKey);overlay.remove();startRefresh();});
+    overlay.querySelector('form').addEventListener('submit',async e=>{
+      e.preventDefault();
+      const input=overlay.querySelector('#statsKey'); const button=overlay.querySelector('button[type="submit"]');
+      apiKey=input.value.trim(); if(!apiKey)return;
+      button.disabled=true; button.textContent='Checking key…'; input.disabled=true;
+      try {
+        await getJson('/api/stats?daily=true');
+        sessionStorage.setItem('shoob-admin-key',apiKey); overlay.remove(); startRefresh();
+      } catch (error) {
+        apiKey=''; button.disabled=false; button.textContent='Unlock analytics ↗'; input.disabled=false; input.value=''; input.focus();
+        const p=overlay.querySelector('p');
+        if(p) p.textContent=/401|403/.test(error.message) ? 'That key was not accepted. Please check it and try again.' : `Could not connect: ${error.message}`;
+      }
+    });
   }
   function applyTheme() {
     const light=localStorage.getItem('shoob-control-room-theme')==='light';document.documentElement.classList.toggle('light-theme',light);
-    const b=$('themeToggle');if(b){b.textContent=light?'☾':'☼';b.title=light?'Switch to dark theme':'Switch to light theme';}
+    const b=$('themeToggle');if(b){b.textContent=light?'🌙':'☀️';b.title=light?'Switch to dark theme':'Switch to light theme';}
     if (Object.keys(charts).length) {
       // Rebuild charts with the updated axis and tooltip palette; data remains sourced from the current view.
       const summary=summarize(filteredRows(lastRows));const data=buildChartData(summary);
