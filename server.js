@@ -1482,79 +1482,122 @@ const PUBLIC_ENDPOINT_DIRECTORY = {
   ok: true,
   service: 'ZCard Control Room',
   documentation: {
-    queryRules: [
-      'Endpoints ( /api/cards, /api/events, /api/random, /api/series, /api/link, /api/download, /api/stats, /api/stats/recent ) require a valid API key.',
-      'Add your key to the end of the URL e.g  ?key=YOUR_API_KEY',
-      'Use "?" before the first query parameter.',
-      'Use & between additional query parameters.',
-      'Query parameter names are case-sensitive.',
-      'Analytics never records API keys, tokens, passwords, or other credential-like query parameters. Admin and internal endpoints are excluded from request analytics.',
-      'For /api/cards and /api/events, limit defaults to 20 and cannot exceed 100. For /api/stats/recent, limit defaults to 50 and must be an integer from 1 to 500.',
-      'page defaults to "1"',
-      'search and q are the same parameter',
-      'series and anime are aliases.',
-      'event is an exact event slug filter (e.g., summer, gala).',
-      'tier is an exact tier filter.',
-      'sort must be an allowed column for that endpoint.',
-      'order accepts "asc" or "desc" (default asc).',
-      'Requesting a page beyond the last page returns ok:true with an empty data array, not an error.',
-      'For /api/link, url must be a Shoob link (api.shoob.gg card link, a shoob.gg card page link containing the card id, or a cdn.shoob.gg file link). Anything else returns \"Invalid Shoob URL\".'
+    introduction: 'Public API directory for the ZCard Control Room Shoob catalogue service. This directory intentionally excludes admin and internal endpoints.',
+    gettingStarted: [
+      '1. Get an API key from the service owner. The key must be configured in the API_KEYS environment variable; this directory does not issue keys.',
+      '2. For browser testing, append &key=YOUR_API_KEY after the first query parameter, or use ?key=YOUR_API_KEY when it is the first parameter.',
+      '3. For scripts, prefer the x-api-key request header so the key is not placed in a URL. The /api/download route also accepts this header.',
+      '4. Open /api/health to check service/Supabase health, then use /api/cards or /api/events to explore catalogue records.',
+      '5. Replace placeholders such as YOUR_API_KEY and CARD_ID with real values. Never publish API keys or commit them to source control.'
     ],
+    authentication: {
+      requiredFor: ['/api/cards', '/api/events', '/api/random', '/api/series', '/api/link', '/api/download', '/api/stats', '/api/stats/recent'],
+      queryParameter: 'key',
+      recommendedHeader: 'x-api-key',
+      errors: [
+        { status: 401, meaning: 'No API key was supplied.' },
+        { status: 403, meaning: 'A key was supplied, but it is not in the configured API_KEYS list.' },
+        { status: 429, meaning: 'The /api/link uncached lookup rate limit was reached; wait for retry_after_seconds.' }
+      ]
+    },
+    queryRules: [
+      'Use ? before the first query parameter and & between later parameters.',
+      'Query parameter names are case-sensitive.',
+      'For /api/cards and /api/events, limit defaults to 20 and is capped at 100. page defaults to 1. Invalid/non-positive page or limit values fall back to their defaults.',
+      'search and q are aliases for searching card name or series; series and anime are aliases for the series filter.',
+      'tier is an exact-match filter. event is an exact event-slug filter, such as summer, halloween, christmas, chinese-new-year, valentines-day, or gala.',
+      'sort values are restricted per endpoint; unsupported sort values fall back to name. order is asc or desc; any value other than desc is treated as ascending.',
+      'A page beyond the last page returns ok:true with an empty data array.',
+      'byseries=true or byseries=1 adds a series-count breakdown to /api/cards. /api/events accepts byevent=true, byevent=1, or byseries=true/1 for an event-card series/event breakdown.',
+      '/api/random returns one random record from the main cards catalogue only; it does not randomly select from event_cards.',
+      '/api/link accepts a Shoob API card URL, a shoob.gg card page URL containing a 24-character card ID, or a direct https://cdn.shoob.gg/ media URL. The url value should be URL-encoded when it contains its own query parameters.',
+      '/api/link resolves a URL; it does not stream or download the image bytes. The returned media/type may be unknown for extensionless CDN URLs even when the URL serves valid image bytes.',
+      '/api/download returns a generated catalogue JSON attachment. It is not an individual image-download endpoint.',
+      '/api/stats uses Africa/Lagos calendar boundaries and retains about three months of analytics. last_N_weeks and last_N_months refer to completed periods, excluding the current period.',
+      '/api/stats/recent returns aggregate daily rows, not individual request logs. Its limit must be an integer from 1 to 500 (default 50).',
+      'Health checks, admin routes, and internal routes are not documented as public API endpoints. Analytics does not intentionally store API-key/token/password query values, and admin/internal paths are excluded.'
+    ],
+    commonScenarios: [
+      { goal: 'Check whether the service is online', steps: ['Open /api/health or /ping. These routes do not require an API key.', 'Look for ok:true and supabaseReachable:true.'] },
+      { goal: 'Get the first page of regular cards', steps: ['Call /api/cards?key=YOUR_API_KEY.', 'Read count for the total matching records, pages for the page count, and data for the current records.'] },
+      { goal: 'Search for a character or series', steps: ['Use /api/cards?search=naruto&key=YOUR_API_KEY, or use q=naruto.', 'For a series filter, use series=One%20Piece or anime=One%20Piece. Search and series filters can be combined.'] },
+      { goal: 'Find high-tier cards', steps: ['Use /api/cards?tier=S&key=YOUR_API_KEY.', 'tier is an exact match, not a partial search.'] },
+      { goal: 'Browse a seasonal event', steps: ['Use /api/events?event=summer&key=YOUR_API_KEY.', 'The event value must match the event slug exactly. Add page, limit, search, tier, or series to narrow results.'] },
+      { goal: 'Get a random regular card', steps: ['Call /api/random?key=YOUR_API_KEY.', 'Add tier, search/q, or series/anime filters if you want a random card from a narrower matching pool.'] },
+      { goal: 'Count series in a catalogue', steps: ['Call /api/series?key=YOUR_API_KEY for regular cards.', 'Call /api/series?event=summer&key=YOUR_API_KEY for the series breakdown of one event.'] },
+      { goal: 'Resolve a Shoob card link', steps: ['Call /api/link with a URL-encoded Shoob card URL and your API key.', 'Read the returned url field and open that CDN URL to view the media. This endpoint returns JSON metadata, not the media file itself.'] },
+      { goal: 'Download the complete catalogue', steps: ['Open /api/download?file=cards&key=YOUR_API_KEY or /api/download?file=events&key=YOUR_API_KEY in a browser.', 'The response downloads cards.json or events.json. For scripts, send the key in the x-api-key header instead of the URL.'] },
+      { goal: 'Review API usage analytics', steps: ['Call /api/stats?key=YOUR_API_KEY for the summary and daily/weekly/monthly breakdowns.', 'Use daily=true, weekly=true, or monthly=true to request a specific breakdown; add endpoint, method, success, failed, or top to filter the details.'] },
+      { goal: 'Read recent analytics aggregates', steps: ['Call /api/stats/recent?limit=50&key=YOUR_API_KEY.', 'Use limit between 1 and 500. Each item is an aggregate for a day/route/signature, not an individual request.'] }
+    ],
+    responseGuide: {
+      catalogue: 'Catalogue query responses include ok, count, page, limit, pages, filters, durationMs, timestamps, and data. data is an array of card records.',
+      cardFields: 'Common fields include id, name, tier, series, image_url, preview_link, author, and author_link. Event records also include event_slug.',
+      errors: 'Error responses usually include ok:false and error. Some database/source failures use HTTP 502; unavailable storage or configuration may use HTTP 503.',
+      timestamps: 'Most endpoints include UTC and Africa/Lagos timestamps. Analytics calendar calculations use Africa/Lagos.'
+    }
   },
   endpoints: [
-    { method: 'GET', path: '/', description: 'Static frontend.' },
-    { method: 'GET', path: '/api/health', description: 'Health and Supabase availability.' },
-    { method: 'GET', path: '/ping', description: 'Health-check alias.' },
-    { method: 'GET', path: '/api/status', description: 'Public runtime and catalog status.' },
-    { 
-      method: 'GET', path: '/api/random', description: 'Returns one random main-catalog card.', 
-      parameters: { key: 'Required API key (or Admin key).', tier: 'Exact tier match.', search: 'Partial search.', series: 'Partial series match.' }, 
-      examples: ['/api/random?key=YOUR_KEY', '/api/random?tier=S&key=YOUR_KEY'] 
-    },
-    { 
-      method: 'GET', path: '/api/series', description: 'Dictionary of all anime series and counts.', 
-      parameters: { key: 'Required API key (or Admin key).', event: 'Optional event slug.' }, 
-      examples: ['/api/series?key=YOUR_KEY', '/api/series?event=summer&key=YOUR_KEY'] 
+    { method: 'GET', path: '/', auth: 'None', description: 'Serves the static frontend if the public directory is present.', scenario: 'Open the service homepage.' },
+    { method: 'GET', path: '/api/health', auth: 'None', description: 'Health check showing service name, Supabase configuration/reachability, active scraping jobs, uptime, and Node.js version.', scenario: 'Use for uptime checks; HTTP 200 means the health condition is passing, while HTTP 503 means the service or Supabase is not healthy.' },
+    { method: 'GET', path: '/ping', auth: 'None', description: 'Alias of /api/health.', scenario: 'Use with uptime monitors or simple curl checks.' },
+    { method: 'GET', path: '/api/status', auth: 'None', description: 'Public runtime/catalog status, scheduler state, sync/backfill status, retention/self-ping status, memory use, log-buffer count, and analytics tracker snapshot.', scenario: 'Inspect general service status without using admin routes.' },
+    { method: 'GET', path: '/api/endpoints', auth: 'None', description: 'Full public endpoint directory with beginner guidance, authentication notes, parameters, examples, and common scenarios.', scenario: 'Start here when learning the API.' },
+    { method: 'GET', path: '/api/endpoint', auth: 'None', description: 'Alias of /api/endpoints.', scenario: 'Use if a client or bookmark uses the singular route.' },
+    {
+      method: 'GET', path: '/api/cards', auth: 'API key', description: 'Searches and paginates the regular/main cards catalogue.',
+      parameters: { key: 'Required API key (query parameter or x-api-key header).', page: 'Optional positive integer; default 1.', limit: 'Optional positive integer; default 20, maximum 100.', tier: 'Optional exact tier match.', search: 'Optional partial match against name or series.', q: 'Alias of search.', series: 'Optional partial series match.', anime: 'Alias of series.', sort: 'name, tier, or series; default name.', order: 'asc or desc; default asc.', byseries: 'Set true or 1 to include bySeries counts.' },
+      examples: ['/api/cards?key=YOUR_API_KEY', '/api/cards?page=2&limit=50&key=YOUR_API_KEY', '/api/cards?search=naruto&key=YOUR_API_KEY', '/api/cards?tier=S&sort=name&order=asc&key=YOUR_API_KEY', '/api/cards?byseries=true&key=YOUR_API_KEY'],
+      response: 'JSON object with count, series_count, page, limit, pages, filters, durationMs, timestamps, and data[].'
     },
     {
-      method: 'GET', path: '/api/link', description: 'Resolves a Shoob card link to its final media file URL (mp4, gif, jpg, png, webp).',
-      parameters: { key: 'Required API key (or Admin key).', url: 'Required. Shoob link, e.g. https://api.shoob.gg/site/api/cardr/CARD_ID?size=700' },
-      examples: ['/api/link?url=https://api.shoob.gg/site/api/cardr/CARD_ID?size=700&key=YOUR_KEY']
-    },
-    { 
-      method: 'GET', path: '/api/stats', description: 'API usage analytics.', 
-      parameters: { key: 'Required API key (or Admin key).', daily: 'true', weekly: 'true', monthly: 'true' }, 
-      examples: ['/api/stats?key=YOUR_KEY', '/api/stats?daily=true&key=YOUR_KEY'] 
+      method: 'GET', path: '/api/events', auth: 'API key', description: 'Searches and paginates event cards; records include event_slug.',
+      parameters: { key: 'Required API key (query parameter or x-api-key header).', page: 'Optional positive integer; default 1.', limit: 'Optional positive integer; default 20, maximum 100.', event: 'Optional exact event slug.', tier: 'Optional exact tier match.', search: 'Optional partial match against name or series.', q: 'Alias of search.', series: 'Optional partial series match.', anime: 'Alias of series.', sort: 'name, tier, series, or event_slug; default name.', order: 'asc or desc; default asc.', byevent: 'Set true or 1 to include event counts.', byseries: 'Alias that also enables the event_slug count breakdown (returned as byEvent).' },
+      examples: ['/api/events?key=YOUR_API_KEY', '/api/events?event=summer&key=YOUR_API_KEY', '/api/events?event=christmas&search=mami&key=YOUR_API_KEY', '/api/events?page=2&limit=50&key=YOUR_API_KEY', '/api/events?byevent=true&key=YOUR_API_KEY'],
+      response: 'JSON object with count, event_count, page, limit, pages, filters, durationMs, timestamps, and data[].'
     },
     {
-      method: 'GET',
-      path: '/api/stats/recent',
-      description: 'Returns recent daily aggregate rows from endpoint_stats, newest day first and then highest total. This is not an individual request log.',
-      parameters: {
-        key: 'Required API key (or Admin key).',
-        limit: 'Optional integer from 1 to 500. Defaults to 50.',
-      },
+      method: 'GET', path: '/api/random', auth: 'API key', description: 'Returns one randomly selected regular/main-catalog card, optionally from a filtered matching pool.',
+      parameters: { key: 'Required API key.', tier: 'Optional exact tier match.', search: 'Optional partial name/series match.', q: 'Alias of search.', series: 'Optional partial series match.', anime: 'Alias of series.' },
+      examples: ['/api/random?key=YOUR_API_KEY', '/api/random?tier=S&key=YOUR_API_KEY', '/api/random?series=One%20Piece&key=YOUR_API_KEY', '/api/random?search=goku&tier=4&key=YOUR_API_KEY'],
+      response: 'JSON object with pool_size, filters, durationMs, timestamps, and data containing one card. Returns HTTP 404 if no cards match.'
+    },
+    {
+      method: 'GET', path: '/api/series', auth: 'API key', description: 'Returns the unique series count and a series-to-card-count dictionary. Without event, uses regular cards; with event, uses event cards.',
+      parameters: { key: 'Required API key.', event: 'Optional exact event slug; when present the source table is event_cards.' },
+      examples: ['/api/series?key=YOUR_API_KEY', '/api/series?event=summer&key=YOUR_API_KEY', '/api/series?event=gala&key=YOUR_API_KEY'],
+      response: 'JSON object with total_series, event, source_table, series, durationMs, and timestamps.'
+    },
+    {
+      method: 'GET', path: '/api/link', auth: 'API key', description: 'Validates a supported Shoob URL and resolves card URLs to a final CDN media URL. It returns a JSON URL; it does not proxy/download the image bytes.',
+      parameters: { key: 'Required API key.', url: 'Required URL from api.shoob.gg/site/api/cardr/{24-character-card-id}, a shoob.gg card page containing the ID, or cdn.shoob.gg media URL.' },
       examples: [
-        '/api/stats/recent?key=YOUR_KEY',
-        '/api/stats/recent?limit=100&key=YOUR_KEY',
-        '/api/stats/recent?limit=500&key=YOUR_KEY',
+        '/api/link?url=https%3A%2F%2Fapi.shoob.gg%2Fsite%2Fapi%2Fcardr%2FCARD_ID%3Fsize%3D700&key=YOUR_API_KEY',
+        '/api/link?url=https%3A%2F%2Fcdn.shoob.gg%2Fimages%2Feventcards%2F1%2F1605056309192.Christmas%25202020&key=YOUR_API_KEY'
       ],
+      response: 'JSON object with ok, card_id, type, media, mime, url, cached, durationMs, and timestamps. For extensionless URLs, type/media can be unknown and mime can be null even if the URL serves an image.',
+      limits: 'Uncached lookups are limited to 30 per IP per minute; cached lookups are not counted toward that limit. Cache lifetime is 10 minutes.'
     },
-    { 
-      method: 'GET', path: '/api/cards', description: 'Search and paginate main-catalog cards.', 
-      parameters: { key: 'Required API key (or Admin key).', page: '1', limit: '20', tier: 'Exact match', search: 'Partial match', series: 'Partial match', sort: 'name, tier, series', order: 'asc, desc' }, 
-      examples: ['/api/cards?key=YOUR_KEY', '/api/cards?tier=S&key=YOUR_KEY'] 
+    {
+      method: 'GET', path: '/api/download', auth: 'API key', description: 'Downloads a full generated catalogue JSON attachment from Supabase Storage. This is a catalogue download, not an individual card-image download.',
+      parameters: { key: 'Required API key; use query parameter in a browser or x-api-key header in a script.', file: 'Required; exactly cards or events.' },
+      examples: ['/api/download?file=cards&key=YOUR_API_KEY', '/api/download?file=events&key=YOUR_API_KEY'],
+      response: 'Downloads cards.json or events.json with Content-Disposition: attachment. Invalid file returns HTTP 400; missing file may return HTTP 404; storage/download errors may return HTTP 502.'
     },
-    { 
-      method: 'GET', path: '/api/events', description: 'Search and paginate event cards.', 
-      parameters: { key: 'Required API key (or Admin key).', event: 'Exact slug', tier: 'Exact match', search: 'Partial match', series: 'Partial match' }, 
-      examples: ['/api/events?event=summer&key=YOUR_KEY'] 
+    {
+      method: 'GET', path: '/api/stats', auth: 'API key', description: 'Returns aggregate API-usage analytics, summary totals, and daily/weekly/monthly breakdowns. Uses Africa/Lagos calendar periods and approximately three months of retained history.',
+      parameters: { key: 'Required API key.', daily: 'true or 1 to include daily breakdown; if no grain flag is enabled, all three breakdowns are returned.', weekly: 'true or 1 to include weekly breakdown.', monthly: 'true or 1 to include monthly breakdown.', endpoint: 'Optional path filter such as /api/cards; can include a supported parameter signature, e.g. /api/cards?tier=S.', method: 'Optional HTTP method filter, e.g. GET.', success: 'true or 1 makes each bucket total reflect successful requests.', failed: 'true or 1 makes each bucket total reflect failed requests.', top: 'Optional number of highest-total buckets to return, clamped to 1–500.' },
+      examples: ['/api/stats?key=YOUR_API_KEY', '/api/stats?daily=true&key=YOUR_API_KEY', '/api/stats?weekly=true&monthly=true&key=YOUR_API_KEY', '/api/stats?endpoint=%2Fapi%2Fcards&method=GET&key=YOUR_API_KEY', '/api/stats?failed=true&top=20&key=YOUR_API_KEY'],
+      response: 'Includes summary totals, window/timezone, filters, generatedAt, and selected daily/weekly/monthly arrays with total, ok, err, avg_time, and max_time.'
     },
-    { method: 'GET', path: '/api/download', description: 'Downloads a full generated catalogue JSON file. Requires API key; file must be cards or events.', parameters: { file: 'Required: cards or events.', key: 'Required API key (query parameter or x-api-key header).' }, examples: ['/api/download?file=cards&key=YOUR_KEY', '/api/download?file=events&key=YOUR_KEY'] },
-    { method: 'GET', path: '/api/endpoints', description: 'This directory.' },
+    {
+      method: 'GET', path: '/api/stats/recent', auth: 'API key', description: 'Returns recent daily aggregate analytics rows ordered newest day first and then highest total. These are aggregate buckets, not request-by-request logs.',
+      parameters: { key: 'Required API key.', limit: 'Optional integer from 1 to 500; default 50.' },
+      examples: ['/api/stats/recent?key=YOUR_API_KEY', '/api/stats/recent?limit=100&key=YOUR_API_KEY'],
+      response: 'JSON object with limit, count, hasMore, window, generatedAt, and recent[]. Each row includes aggregate counts and timing information.'
+    }
   ],
 };
-
 app.get(['/api/endpoints', '/api/endpoint'], (req, res) => {
   res.set('Cache-Control', 'no-store');
   res.json({ ...PUBLIC_ENDPOINT_DIRECTORY, requestedPath: req.path, generatedAt: new Date().toISOString() });
