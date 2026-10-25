@@ -1151,14 +1151,21 @@ async function resolveAndSavePreview(catalog, row, { backfill = false } = {}) {
   }
   try {
     const url = source.directUrl || await resolveShoobCard(source.id, source.size || 700);
+    let parsedUrl;
+    try { parsedUrl = new URL(url); } catch { throw new Error('Resolved URL is invalid'); }
+    // For preview_link repair, Shoob's CDN URL is authoritative even when its
+    // path has no file extension (e.g. /1605056309192.Christmas%202020).
+    // Keep the exact HTTPS hostname check; never accept substring/lookalike hosts.
+    if (parsedUrl.protocol !== 'https:' || parsedUrl.hostname.toLowerCase() !== 'cdn.shoob.gg' || parsedUrl.username || parsedUrl.password || parsedUrl.port) {
+      throw new Error('Resolved URL is not an approved Shoob CDN URL');
+    }
     const info = describeMedia(url);
-    if (!info.mime) throw new Error('Resolved URL has an unsupported media extension');
     const { error } = await supabase.from(table).update({ preview_link: url }).eq('id', String(row.id));
     if (error) throw error;
     logger.log('SUCCESS', 'preview-link', 'Preview link resolved and saved', {
       catalog, cardId: String(row.id), ...label, type: info.type, media: info.media, cached: false, backfill,
     });
-    return { ok: true, url, type: info.type };
+    return { ok: true, url, type: info.type, media: info.media };
   } catch (error) {
     logger.log('WARN', 'preview-link', 'Preview link resolution failed; card retained and may be retried', {
       catalog, cardId: String(row.id), ...label, reason: String(error?.message || error).slice(0, 300), retryable: true, backfill,
@@ -1336,15 +1343,24 @@ app.post('/api/admin/preview-links/repair', requireAdmin, async (req, res) => {
       const rows = plan[catalog].rows;
       let succeeded = 0;
       let failed = 0;
-      const failures = [];
+      const records = [];
       await mapWithConcurrency(rows, PREVIEW_REPAIR_CONCURRENCY, async row => {
         const result = await resolveAndSavePreview(catalog, row, { backfill: true });
-        if (result.ok) succeeded++;
-        else {
+        const record = {
+          id: String(row.id),
+          name: String(row.name || ''),
+          catalog,
+          ...(catalog === 'events' ? { event: String(row.event_slug || 'unknown') } : {}),
+        };
+        if (result.ok) {
+          succeeded++;
+          records.push({ ...record, status: result.skipped ? 'skipped' : 'repaired', url: result.url || row.preview_link || null, mediaType: result.type || 'unknown' });
+        } else {
           failed++;
-          if (failures.length < 25) failures.push({ id: String(row.id), reason: String(result.reason || 'resolution_failed').slice(0, 200) });
+          records.push({ ...record, status: 'failed', reason: String(result.reason || 'resolution_failed').slice(0, 200) });
         }
       });
+      records.sort((a, b) => rows.findIndex(row => String(row.id) === a.id) - rows.findIndex(row => String(row.id) === b.id));
       if (succeeded > 0) {
         if (catalog === 'cards') await rebuildMainStorage();
         else await rebuildEventStorage();
@@ -1355,7 +1371,7 @@ app.post('/api/admin/preview-links/repair', requireAdmin, async (req, res) => {
         succeeded,
         failed,
         capped: plan[catalog].capped,
-        failures,
+        records,
       };
     }
 
