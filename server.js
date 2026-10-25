@@ -81,6 +81,10 @@ const state = {
   retention: {
     lastRunAt: null, lastSuccessAt: null, lastError: null, systemLogsDeleted: 0, syncRunsDeleted: 0,
   },
+  previewLinkBackfill: {
+    cards: { status: 'waiting', completed: false, processed: 0, succeeded: 0, failed: 0, cursor: null, startedAt: null, finishedAt: null, lastError: null },
+    events: { status: 'waiting', completed: false, processed: 0, succeeded: 0, failed: 0, cursor: null, startedAt: null, finishedAt: null, lastError: null },
+  },
 };
 
 let memoryCards = null;
@@ -263,7 +267,7 @@ function requireApiKey(req, res, next) {
 function rowsForCards(cards) {
   return cards.map(c => ({
     id: String(c.id), name: String(c.name || 'Unknown'), tier: c.tier == null ? null : String(c.tier),
-    series: c.series || '', image_url: c.image_url || null, author: c.author || 'Anonymous',
+    series: c.series || '', image_url: c.image_url || null, preview_link: c.preview_link || null, author: c.author || 'Anonymous',
     author_link: c.author_link || 'Hidden', synced_at: new Date().toISOString(),
   }));
 }
@@ -287,12 +291,26 @@ async function saveStorage(filename, value) {
   if (error) throw error;
 }
 
+async function readCatalogMetadata(catalog) {
+  const { data, error } = await supabase.from('catalog_state').select('metadata').eq('catalog', catalog).maybeSingle();
+  if (error) throw error;
+  return data?.metadata && typeof data.metadata === 'object' ? data.metadata : {};
+}
+
+async function updateCatalogState(catalog, patch, metadataPatch = null) {
+  const update = { ...patch };
+  if (metadataPatch) update.metadata = { ...(await readCatalogMetadata(catalog)), ...metadataPatch };
+  const { error } = await supabase.from('catalog_state').update(update).eq('catalog', catalog);
+  if (error) throw error;
+}
+
 async function saveCatalogState(catalog, count, status, error = null, metadata = {}) {
   const storagePath = catalog === 'cards' ? 'cards.json' : 'events.json';
+  const mergedMetadata = { ...(await readCatalogMetadata(catalog)), ...metadata };
   const row = {
     catalog, record_count: count, storage_path: storagePath, last_checked_at: new Date().toISOString(),
     last_synced_at: status === 'ready' ? new Date().toISOString() : undefined,
-    last_error: error ? String(error).slice(0, 1000) : null, status, metadata,
+    last_error: error ? String(error).slice(0, 1000) : null, status, metadata: mergedMetadata,
   };
   const { error: dbError } = await supabase.from('catalog_state').upsert(row, { onConflict: 'catalog' });
   if (dbError) throw dbError;
@@ -338,7 +356,7 @@ async function recordNoopRun(catalog, trigger, sourceTotal, dbCount, metadata = 
 async function rebuildMainStorage() {
   const rows = await readAllRows('cards');
   await saveStorage('cards.json', rows.map(r => ({
-    id: String(r.id), name: r.name, tier: r.tier, series: r.series || '', image_url: r.image_url, author: r.author, author_link: r.author_link,
+    id: String(r.id), name: r.name, tier: r.tier, series: r.series || '', image_url: r.image_url, preview_link: r.preview_link || null, author: r.author, author_link: r.author_link,
   })));
   state.cards.storage = 'available';
 }
@@ -350,7 +368,7 @@ async function rebuildEventStorage() {
     const slug = String(row.event_slug || 'unknown');
     if (!grouped[slug]) grouped[slug] = [];
     grouped[slug].push({
-      id: String(row.id), name: row.name, tier: row.tier, series: row.series || '', event: slug, image_url: row.image_url, author: row.author, author_link: row.author_link,
+      id: String(row.id), name: row.name, tier: row.tier, series: row.series || '', event: slug, image_url: row.image_url, preview_link: row.preview_link || null, author: row.author, author_link: row.author_link,
     });
   }
   await saveStorage('events.json', grouped);
@@ -368,6 +386,7 @@ async function syncMain(cards, trigger, sourceTotal = null) {
   if (run.error) throw run.error;
   try {
     await upsertBatches('cards', rowsForCards(clean));
+    await mapWithConcurrency(clean, PREVIEW_BACKFILL_CONCURRENCY, card => resolveAndSavePreview('cards', card));
     const dbCount = await countRows('cards');
     await rebuildMainStorage();
     await saveCatalogState('cards', dbCount, 'ready', null, { trigger, sourceTotal, mode: 'incremental', recordsAdded: clean.length });
@@ -397,8 +416,9 @@ async function syncEvents(cards, trigger, scraper = null, sourceTotal = null) {
   if (run.error) throw run.error;
   try {
     const eventRows = rowsForEvents(clean);
-    const { error: upsertError } = await supabase.from('event_cards').upsert(eventRows, { onConflict: 'id,event_slug' });
+    const { error: upsertError } = await supabase.from('event_cards').upsert(eventRows, { onConflict: 'id' });
     if (upsertError) throw upsertError;
+    await mapWithConcurrency(clean, PREVIEW_BACKFILL_CONCURRENCY, card => resolveAndSavePreview('events', { ...card, event_slug: card.event || card.event_slug || 'unknown' }));
     const dbRows = await readAllRows('event_cards', 'id,event_slug');
     const dbCount = dbRows.length;
     await rebuildEventStorage();
@@ -436,9 +456,7 @@ async function scrapeMainAndSync(trigger) {
     if (summary.total === dbCount) {
       if (state.cards.storage !== 'available') await rebuildMainStorage();
       await recordNoopRun('cards', trigger, summary.total, dbCount);
-      await supabase.from('catalog_state').update({
-        last_checked_at: new Date().toISOString(), status: 'ready', last_error: null, metadata: { trigger, mode: 'count-match-noop', sourceTotal: summary.total },
-      }).eq('catalog', 'cards');
+      await updateCatalogState('cards', { last_checked_at: new Date().toISOString(), status: 'ready', last_error: null }, { trigger, mode: 'count-match-noop', sourceTotal: summary.total });
       state.cards.count = dbCount; state.cards.error = null; state.cards.countsMatch = true;
     } else {
       const existingRows = await readAllRows('cards', 'id');
@@ -449,9 +467,7 @@ async function scrapeMainAndSync(trigger) {
       if (!missing.length) {
         const note = `ZCard total ${summary.total} differs from Supabase ${dbCount}, but no missing IDs were found.`;
         await recordNoopRun('cards', trigger, summary.total, dbCount, { mode: 'count-mismatch-no-missing-ids', warning: note });
-        await supabase.from('catalog_state').update({
-          last_checked_at: new Date().toISOString(), status: 'ready', last_error: note, metadata: { trigger, sourceTotal: summary.total, databaseCount: dbCount, warning: note },
-        }).eq('catalog', 'cards');
+        await updateCatalogState('cards', { last_checked_at: new Date().toISOString(), status: 'ready', last_error: note }, { trigger, sourceTotal: summary.total, databaseCount: dbCount, warning: note });
         state.cards.count = dbCount; state.cards.countsMatch = false;
       } else {
         if (dbCount > 0 && missing.length > Math.max(5000, summary.total * 0.35)) throw new Error(`Safety stop: ${missing.length} missing cards is an unexpectedly large delta`);
@@ -485,9 +501,7 @@ async function scrapeEventsAndSync(trigger) {
     if (allMatch) {
       if (state.events.storage !== 'available') await rebuildEventStorage();
       await recordNoopRun('events', trigger, summary.total, dbRows.length, { byEvent: summary.byEvent });
-      await supabase.from('catalog_state').update({
-        last_checked_at: new Date().toISOString(), status: 'ready', last_error: null, metadata: { trigger, mode: 'per-event-count-match', sourceTotal: summary.total, byEvent: summary.byEvent },
-      }).eq('catalog', 'events');
+      await updateCatalogState('events', { last_checked_at: new Date().toISOString(), status: 'ready', last_error: null }, { trigger, mode: 'per-event-count-match', sourceTotal: summary.total, byEvent: summary.byEvent });
       state.events.count = dbRows.length; state.events.error = null; state.events.countsMatch = true;
     } else {
       const scraper = new ShoobEventScraper({ existingKeys });
@@ -496,9 +510,7 @@ async function scrapeEventsAndSync(trigger) {
       if (!missing.length) {
         const note = 'Per-event source and database counts differ, but no missing event/card pairs were found.';
         await recordNoopRun('events', trigger, summary.total, dbRows.length, { mode: 'count-mismatch-no-missing-ids', warning: note, byEvent: summary.byEvent });
-        await supabase.from('catalog_state').update({
-          last_checked_at: new Date().toISOString(), status: 'ready', last_error: note, metadata: { trigger, sourceTotal: summary.total, databaseCount: dbRows.length, warning: note, byEvent: summary.byEvent },
-        }).eq('catalog', 'events');
+        await updateCatalogState('events', { last_checked_at: new Date().toISOString(), status: 'ready', last_error: note }, { trigger, sourceTotal: summary.total, databaseCount: dbRows.length, warning: note, byEvent: summary.byEvent });
         state.events.count = dbRows.length; state.events.countsMatch = false;
       } else {
         if (dbRows.length > 0 && missing.length > Math.max(2000, summary.total * 0.5)) throw new Error(`Safety stop: ${missing.length} missing event-card pairs is an unexpectedly large delta`);
@@ -549,6 +561,7 @@ async function monitorOnce() {
     state.events.count = events.dbCount; state.events.storage = events.storageExists ? 'available' : 'missing';
     state.events.lastSyncAt = events.stateRow?.last_synced_at || state.events.lastSyncAt;
     state.events.sourceTotal = events.stateRow?.metadata?.sourceTotal ?? state.events.sourceTotal;
+    void startPreviewBackfillIfNeeded();
     if (!main.present && !state.cards.isScraping) void scrapeMainAndSync('startup-recovery');
     if (!events.present && !state.events.isScraping) void scrapeEventsAndSync('startup-recovery');
   } catch (e) {
@@ -825,6 +838,33 @@ app.post('/api/internal/logs', requireInternalOrAdmin, (req, res) => {
 app.get('/api/stats', requireApiKey, stats.handler);
 app.get('/api/stats/recent', requireApiKey, stats.recentHandler);
 
+// Full catalogue downloads. Only the two documented names are accepted.
+app.get('/api/download', requireApiKey, async (req, res) => {
+  if (!supabase) return res.status(503).json({ ok: false, error: 'Catalog storage unavailable' });
+  const file = String(req.query.file || '').toLowerCase();
+  if (!['cards', 'events'].includes(file)) {
+    return res.status(400).json({ ok: false, error: 'Invalid file parameter. Use file=cards or file=events.', usage: '/api/download?file=cards&key=YOUR_KEY' });
+  }
+  const filename = `${file}.json`;
+  try {
+    const bucket = supabase.storage.from(process.env.SUPABASE_STORAGE_BUCKET || 'shoob-catalogs');
+    const { data, error } = await bucket.download(filename);
+    if (error) throw error;
+    if (!data) return res.status(404).json({ ok: false, error: `${filename} is not available yet.` });
+    const buffer = Buffer.from(await data.arrayBuffer());
+    res.set({
+      'Content-Type': 'application/json; charset=utf-8',
+      'Content-Disposition': `attachment; filename="${filename}"`,
+      'Cache-Control': 'private, no-store, max-age=0',
+      'X-Content-Type-Options': 'nosniff',
+    });
+    return res.status(200).send(buffer);
+  } catch (error) {
+    logger.log('ERROR', 'download', 'Full catalogue download failed', { file, error: String(error?.message || error).slice(0, 300) });
+    return res.status(502).json({ ok: false, error: `Could not download ${filename} from catalogue storage.` });
+  }
+});
+
 app.get('/api/cards', requireApiKey, async (req, res) => {
   if (!supabase) return res.status(503).json({ ok: false, error: 'Catalog database unavailable' });
   const limit = Math.min(100, parsePositiveInt(req.query.limit, 20));
@@ -1072,6 +1112,153 @@ async function resolveShoobCard(id, size) {
   }
 }
 
+// Persistent preview-link backfill. Progress lives in catalog_state.metadata so it survives Render restarts.
+const PREVIEW_BACKFILL_BATCH = 100;
+const PREVIEW_BACKFILL_CONCURRENCY = 3;
+let previewBackfillPromise = null;
+let previewBackfillStartedThisProcess = false;
+
+async function mapWithConcurrency(items, concurrency, worker) {
+  let next = 0;
+  const runners = Array.from({ length: Math.min(concurrency, items.length) }, async () => {
+    while (true) {
+      const index = next++;
+      if (index >= items.length) return;
+      await worker(items[index], index);
+    }
+  });
+  await Promise.all(runners);
+}
+
+function sourceCardUrl(row) {
+  const candidate = row?.image_url;
+  const parsed = parseShoobUrl(candidate);
+  if (parsed?.kind === 'card') return { id: parsed.id, size: parsed.size || 700 };
+  if (parsed?.kind === 'media') return { directUrl: parsed.url };
+  if (SHOOB_CARD_ID_RE.test(String(row?.id || ''))) return { id: String(row.id), size: 700 };
+  return null;
+}
+
+async function resolveAndSavePreview(catalog, row, { backfill = false } = {}) {
+  const table = catalog === 'cards' ? 'cards' : 'event_cards';
+  const label = catalog === 'events' ? { event: row.event_slug || 'unknown' } : {};
+  const already = typeof row.preview_link === 'string' && row.preview_link.startsWith('https://cdn.shoob.gg/');
+  if (already) return { ok: true, cached: true, skipped: true };
+  const source = sourceCardUrl(row);
+  if (!source) {
+    logger.log('WARN', 'preview-link', 'Preview link skipped: no valid Shoob source URL or card ID', { catalog, cardId: row.id, ...label, backfill });
+    return { ok: false, reason: 'invalid_source_url' };
+  }
+  try {
+    const url = source.directUrl || await resolveShoobCard(source.id, source.size || 700);
+    const info = describeMedia(url);
+    if (!info.mime) throw new Error('Resolved URL has an unsupported media extension');
+    const { error } = await supabase.from(table).update({ preview_link: url }).eq('id', String(row.id));
+    if (error) throw error;
+    logger.log('SUCCESS', 'preview-link', 'Preview link resolved and saved', {
+      catalog, cardId: String(row.id), ...label, type: info.type, media: info.media, cached: false, backfill,
+    });
+    return { ok: true, url, type: info.type };
+  } catch (error) {
+    logger.log('WARN', 'preview-link', 'Preview link resolution failed; card retained and may be retried', {
+      catalog, cardId: String(row.id), ...label, reason: String(error?.message || error).slice(0, 300), retryable: true, backfill,
+    });
+    return { ok: false, reason: String(error?.message || error) };
+  }
+}
+
+async function persistBackfillState(catalog, patch) {
+  const current = await readCatalogMetadata(catalog);
+  const prior = current.preview_link_backfill && typeof current.preview_link_backfill === 'object' ? current.preview_link_backfill : {};
+  const next = { ...prior, ...patch, updated_at: new Date().toISOString() };
+  await updateCatalogState(catalog, {}, { preview_link_backfill: next });
+  state.previewLinkBackfill[catalog] = {
+    status: next.status || 'waiting', completed: next.completed === true,
+    processed: Number(next.processed || 0), succeeded: Number(next.succeeded || 0), failed: Number(next.failed || 0),
+    cursor: next.cursor || null, startedAt: next.started_at || null, finishedAt: next.finished_at || null, lastError: next.last_error || null,
+  };
+  return next;
+}
+
+async function runPreviewBackfillForCatalog(catalog) {
+  const table = catalog === 'cards' ? 'cards' : 'event_cards';
+  let metadata = await readCatalogMetadata(catalog);
+  let job = metadata.preview_link_backfill || {};
+  if (job.completed === true) {
+    state.previewLinkBackfill[catalog] = {
+      status: 'completed', completed: true, processed: Number(job.processed || 0), succeeded: Number(job.succeeded || 0),
+      failed: Number(job.failed || 0), cursor: job.cursor || null, startedAt: job.started_at || null, finishedAt: job.finished_at || null, lastError: null,
+    };
+    logger.log('INFO', 'preview-link', 'One-time preview-link backfill already completed; skipping', { catalog, processed: Number(job.processed || 0), failed: Number(job.failed || 0) });
+    return;
+  }
+
+  const startedAt = job.started_at || new Date().toISOString();
+  let processed = Number(job.processed || 0);
+  let succeeded = Number(job.succeeded || 0);
+  let failed = Number(job.failed || 0);
+  let cursor = job.cursor || null;
+  await persistBackfillState(catalog, { status: 'running', completed: false, started_at: startedAt, finished_at: null, processed, succeeded, failed, cursor, last_error: null });
+  logger.log('INFO', 'preview-link', 'One-time preview-link backfill started/resumed', { catalog, processed, succeeded, failed, cursor, batchSize: PREVIEW_BACKFILL_BATCH, concurrency: PREVIEW_BACKFILL_CONCURRENCY });
+
+  try {
+    for (;;) {
+      const columns = catalog === 'events' ? 'id,image_url,preview_link,event_slug' : 'id,image_url,preview_link';
+      let query = supabase.from(table).select(columns).order('id', { ascending: true }).limit(PREVIEW_BACKFILL_BATCH);
+      if (cursor) query = query.gt('id', cursor);
+      const { data, error } = await query;
+      if (error) throw error;
+      const rows = data || [];
+      if (!rows.length) break;
+      let batchSucceeded = 0;
+      let batchFailed = 0;
+      await mapWithConcurrency(rows, PREVIEW_BACKFILL_CONCURRENCY, async row => {
+        if (typeof row.preview_link === 'string' && row.preview_link.startsWith('https://cdn.shoob.gg/')) {
+          batchSucceeded++;
+          return;
+        }
+        const result = await resolveAndSavePreview(catalog, row, { backfill: true });
+        if (result.ok) batchSucceeded++;
+        else batchFailed++;
+      });
+      processed += rows.length;
+      succeeded += batchSucceeded;
+      failed += batchFailed;
+      cursor = String(rows[rows.length - 1].id);
+      await persistBackfillState(catalog, { status: 'running', completed: false, started_at: startedAt, processed, succeeded, failed, cursor, last_error: null });
+      logger.log('INFO', 'preview-link', 'Preview-link backfill progress', { catalog, processed, succeeded, failed, lastCardId: cursor, batchSize: rows.length });
+    }
+
+    // Publish the populated preview_link values into the downloadable JSON snapshot before marking done.
+    if (catalog === 'cards') await rebuildMainStorage();
+    else await rebuildEventStorage();
+    const finishedAt = new Date().toISOString();
+    await persistBackfillState(catalog, { status: failed ? 'completed_with_failures' : 'completed', completed: true, started_at: startedAt, finished_at: finishedAt, processed, succeeded, failed, cursor, last_error: null });
+    logger.log(failed ? 'WARN' : 'SUCCESS', 'preview-link', 'One-time preview-link backfill finished', {
+      catalog, completed: true, processed, succeeded, failed, startedAt, finishedAt,
+      note: failed ? 'Scan completed; unresolved records remain blank and are not automatically rescanned by this one-time job.' : 'All scanned records have a saved preview link or were already resolved.',
+    });
+  } catch (error) {
+    await persistBackfillState(catalog, { status: 'failed', completed: false, started_at: startedAt, processed, succeeded, failed, cursor, last_error: String(error?.message || error).slice(0, 500) }).catch(() => {});
+    logger.log('ERROR', 'preview-link', 'Preview-link backfill interrupted; it will resume after restart', { catalog, processed, succeeded, failed, cursor, error: String(error?.message || error).slice(0, 300) });
+    throw error;
+  }
+}
+
+async function startPreviewBackfillIfNeeded() {
+  if (!supabase || !state.supabaseReachable || previewBackfillPromise || previewBackfillStartedThisProcess) return;
+  previewBackfillStartedThisProcess = true;
+  previewBackfillPromise = (async () => {
+    for (const catalog of ['cards', 'events']) {
+      await runPreviewBackfillForCatalog(catalog);
+    }
+  })().catch(error => {
+    logger.log('ERROR', 'preview-link', 'Preview-link backfill runner stopped; a later restart will resume it', { error: String(error?.message || error).slice(0, 300) });
+    // Keep this process from repeatedly restarting a failed job every monitor tick. A Render restart resumes it.
+  }).finally(() => { previewBackfillPromise = null; });
+  return previewBackfillPromise;
+}
+
 app.get('/api/link', requireApiKey, async (req, res) => {
   const startTime = Date.now();
   const base = () => ({ durationMs: Date.now() - startTime, timestamps: getTimestamps() });
@@ -1094,18 +1281,42 @@ app.get('/api/link', requireApiKey, async (req, res) => {
     } else {
       cardId = parsed.id;
       const cacheKey = `${parsed.id}|${parsed.size || ''}`;
-      const hit = linkCacheGet(cacheKey);
-      if (hit) {
-        mediaUrl = hit;
-        cached = true;
-      } else {
-        const wait = linkRateCheck(req.ip || 'unknown');
-        if (wait) {
-          res.set('Retry-After', String(wait));
-          return res.status(429).json({ ok: false, error: 'Too many link lookups. Try again shortly.', retry_after_seconds: wait, ...base() });
+      let savedRow = null;
+      if (supabase) {
+        for (const table of ['cards', 'event_cards']) {
+          const { data, error } = await supabase.from(table).select('id,preview_link').eq('id', parsed.id).maybeSingle();
+          if (error) {
+            logger.log('WARN', 'preview-link', 'Persistent preview lookup failed; falling back to direct Shoob resolution', { cardId: parsed.id, catalog: table === 'cards' ? 'cards' : 'events', error: String(error.message || error).slice(0, 250) });
+            savedRow = null;
+            break;
+          }
+          if (data) { savedRow = { ...data, table }; break; }
         }
-        mediaUrl = await resolveShoobCard(parsed.id, parsed.size);
+      }
+      // Use durable catalogue storage for the default/standard preview size. A custom size must resolve directly.
+      if (savedRow?.preview_link && (!parsed.size || parsed.size === 700) && /^https:\/\/cdn\.shoob\.gg\//i.test(savedRow.preview_link)) {
+        mediaUrl = savedRow.preview_link;
+        cached = true;
         linkCacheSet(cacheKey, mediaUrl);
+      } else {
+        const hit = linkCacheGet(cacheKey);
+        if (hit) {
+          mediaUrl = hit;
+          cached = true;
+        } else {
+          const wait = linkRateCheck(req.ip || 'unknown');
+          if (wait) {
+            res.set('Retry-After', String(wait));
+            return res.status(429).json({ ok: false, error: 'Too many link lookups. Try again shortly.', retry_after_seconds: wait, cached: false, ...base() });
+          }
+          mediaUrl = await resolveShoobCard(parsed.id, parsed.size || 700);
+          linkCacheSet(cacheKey, mediaUrl);
+          if (savedRow && (!parsed.size || parsed.size === 700)) {
+            const { error } = await supabase.from(savedRow.table).update({ preview_link: mediaUrl }).eq('id', parsed.id);
+            if (error) logger.log('WARN', 'preview-link', 'Resolved URL returned but could not be persisted', { cardId: parsed.id, catalog: savedRow.table === 'cards' ? 'cards' : 'events', error: error.message });
+            else logger.log('SUCCESS', 'preview-link', 'Preview link resolved and saved by /api/link', { cardId: parsed.id, catalog: savedRow.table === 'cards' ? 'cards' : 'events', cached: false });
+          }
+        }
       }
     }
 
@@ -1114,7 +1325,7 @@ app.get('/api/link', requireApiKey, async (req, res) => {
   } catch (error) {
     const status = error && error.status ? error.status : 502;
     const message = error && error.status ? error.message : 'Link lookup failed';
-    return res.status(status).json({ ok: false, error: message, ...base() });
+    return res.status(status).json({ ok: false, error: message, error_code: status === 404 ? 'CARD_NOT_FOUND' : status === 504 ? 'PREVIEW_TIMEOUT' : 'PREVIEW_RESOLUTION_FAILED', retryable: status !== 400 && status !== 404, cached: false, ...base() });
   }
 });
 
@@ -1136,7 +1347,7 @@ const PUBLIC_ENDPOINT_DIRECTORY = {
   service: 'ZCard Control Room',
   documentation: {
     queryRules: [
-      'Endpoints ( /api/cards, /api/events, /api/random, /api/series, /api/link, /api/stats, /api/stats/recent ) require a valid API key.',
+      'Endpoints ( /api/cards, /api/events, /api/random, /api/series, /api/link, /api/download, /api/stats, /api/stats/recent ) require a valid API key.',
       'Add your key to the end of the URL e.g  ?key=YOUR_API_KEY',
       'Use "?" before the first query parameter.',
       'Use & between additional query parameters.',
@@ -1203,6 +1414,7 @@ const PUBLIC_ENDPOINT_DIRECTORY = {
       parameters: { key: 'Required API key (or Admin key).', event: 'Exact slug', tier: 'Exact match', search: 'Partial match', series: 'Partial match' }, 
       examples: ['/api/events?event=summer&key=YOUR_KEY'] 
     },
+    { method: 'GET', path: '/api/download', description: 'Downloads a full generated catalogue JSON file. Requires API key; file must be cards or events.', parameters: { file: 'Required: cards or events.', key: 'Required API key (query parameter or x-api-key header).' }, examples: ['/api/download?file=cards&key=YOUR_KEY', '/api/download?file=events&key=YOUR_KEY'] },
     { method: 'GET', path: '/api/endpoints', description: 'This directory.' },
   ],
 };

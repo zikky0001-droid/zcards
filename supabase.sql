@@ -1,0 +1,417 @@
+-- ============================================================
+-- ZCARD DATABASE + PRIVATE STORAGE + ENDPOINT STATS
+-- Complete setup for a fresh Supabase project.
+--
+-- Includes:
+--   * Normal and event card catalogues, including preview_link
+--   * Catalogue state and sync history
+--   * Persistent system logs and API key metadata
+--   * Three-month endpoint analytics storage/function
+--   * Private shoob-catalogs Storage bucket
+--   * RLS and service_role privileges
+--
+-- IMPORTANT:
+--   1. Intended for a fresh project or a compatible existing schema.
+--   2. CREATE TABLE IF NOT EXISTS does NOT retrofit columns into an
+--      existing table. The additive ALTER TABLE statements below do that.
+--   3. This script intentionally preserves event_cards.id as its
+--      existing primary key; it does not change keys or constraints.
+--   4. Run with sufficient Supabase SQL Editor privileges.
+-- ============================================================
+
+BEGIN;
+
+-- ------------------------------------------------------------
+-- 1. REQUIRED EXTENSION
+-- ------------------------------------------------------------
+
+CREATE EXTENSION IF NOT EXISTS pgcrypto;
+
+-- ------------------------------------------------------------
+-- 2. MAIN CARDS
+-- ------------------------------------------------------------
+
+CREATE TABLE IF NOT EXISTS public.cards (
+    id                  text PRIMARY KEY,
+    name                text NOT NULL,
+    tier                text,
+    series              text,
+    image_url           text,
+    preview_link        text,
+    author              text,
+    author_link         text,
+    source_updated_at   timestamptz,
+    synced_at           timestamptz NOT NULL DEFAULT now()
+);
+
+-- Additive compatibility for an existing table created before preview_link.
+ALTER TABLE public.cards
+    ADD COLUMN IF NOT EXISTS preview_link text;
+
+CREATE INDEX IF NOT EXISTS cards_tier_idx
+    ON public.cards (tier);
+
+CREATE INDEX IF NOT EXISTS cards_series_idx
+    ON public.cards (series);
+
+CREATE INDEX IF NOT EXISTS cards_name_search_idx
+    ON public.cards USING gin (
+        to_tsvector('simple', coalesce(name, '') || ' ' || coalesce(series, ''))
+    );
+
+-- ------------------------------------------------------------
+-- 3. EVENT CARDS
+-- ------------------------------------------------------------
+
+CREATE TABLE IF NOT EXISTS public.event_cards (
+    id                  text PRIMARY KEY,
+    name                text NOT NULL,
+    tier                text,
+    series              text,
+    image_url           text,
+    preview_link        text,
+    author              text,
+    author_link         text,
+    event_slug          text NOT NULL,
+    source_updated_at   timestamptz,
+    synced_at           timestamptz NOT NULL DEFAULT now()
+);
+
+-- Additive compatibility for an existing table created before preview_link.
+ALTER TABLE public.event_cards
+    ADD COLUMN IF NOT EXISTS preview_link text;
+
+CREATE INDEX IF NOT EXISTS event_cards_event_idx
+    ON public.event_cards (event_slug);
+
+CREATE INDEX IF NOT EXISTS event_cards_tier_idx
+    ON public.event_cards (tier);
+
+CREATE INDEX IF NOT EXISTS event_cards_series_idx
+    ON public.event_cards (series);
+
+CREATE INDEX IF NOT EXISTS event_cards_name_search_idx
+    ON public.event_cards USING gin (
+        to_tsvector('simple', coalesce(name, '') || ' ' || coalesce(series, ''))
+    );
+
+-- ------------------------------------------------------------
+-- 4. CATALOG STATE
+-- ------------------------------------------------------------
+
+CREATE TABLE IF NOT EXISTS public.catalog_state (
+    catalog             text PRIMARY KEY CHECK (catalog IN ('cards', 'events')),
+    record_count        bigint NOT NULL DEFAULT 0,
+    storage_path        text NOT NULL,
+    last_checked_at     timestamptz,
+    last_synced_at      timestamptz,
+    last_error          text,
+    status              text NOT NULL DEFAULT 'missing',
+    metadata            jsonb NOT NULL DEFAULT '{}'::jsonb
+);
+
+INSERT INTO public.catalog_state (catalog, storage_path)
+VALUES ('cards', 'cards.json'), ('events', 'events.json')
+ON CONFLICT (catalog) DO NOTHING;
+
+-- ------------------------------------------------------------
+-- 5. SCRAPE / SYNC HISTORY
+-- ------------------------------------------------------------
+
+CREATE TABLE IF NOT EXISTS public.sync_runs (
+    id                  uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+    catalog             text NOT NULL,
+    trigger             text NOT NULL,
+    status              text NOT NULL DEFAULT 'running',
+    started_at          timestamptz NOT NULL DEFAULT now(),
+    finished_at         timestamptz,
+    records_found       bigint,
+    records_added       bigint,
+    error               text,
+    metadata            jsonb NOT NULL DEFAULT '{}'::jsonb
+);
+
+CREATE INDEX IF NOT EXISTS sync_runs_started_idx
+    ON public.sync_runs (started_at DESC);
+
+CREATE INDEX IF NOT EXISTS sync_runs_catalog_status_idx
+    ON public.sync_runs (catalog, status);
+
+-- ------------------------------------------------------------
+-- 6. SYSTEM LOGS
+-- ------------------------------------------------------------
+
+CREATE TABLE IF NOT EXISTS public.system_logs (
+    id                  text PRIMARY KEY,
+    timestamp           timestamptz NOT NULL DEFAULT now(),
+    level               text NOT NULL,
+    component           text NOT NULL,
+    message             text NOT NULL,
+    details             jsonb NOT NULL DEFAULT '{}'::jsonb
+);
+
+CREATE INDEX IF NOT EXISTS system_logs_timestamp_idx
+    ON public.system_logs (timestamp DESC);
+
+CREATE INDEX IF NOT EXISTS system_logs_level_timestamp_idx
+    ON public.system_logs (level, timestamp DESC);
+
+CREATE INDEX IF NOT EXISTS system_logs_component_timestamp_idx
+    ON public.system_logs (component, timestamp DESC);
+
+-- ------------------------------------------------------------
+-- 7. API KEY METADATA
+-- ------------------------------------------------------------
+
+CREATE TABLE IF NOT EXISTS public.api_keys (
+    id                  uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+    label               text NOT NULL,
+    key_hash            text NOT NULL UNIQUE,
+    key_prefix          text NOT NULL,
+    created_at          timestamptz NOT NULL DEFAULT now(),
+    last_used_at        timestamptz,
+    disabled_at         timestamptz,
+    metadata            jsonb NOT NULL DEFAULT '{}'::jsonb
+);
+
+-- Store hashes/prefixes only, never raw API secrets.
+
+-- ------------------------------------------------------------
+-- 8. ENDPOINT STATS (3-MONTH ROLLING ANALYTICS)
+-- ------------------------------------------------------------
+
+CREATE TABLE IF NOT EXISTS public.endpoint_stats (
+    id              bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    day             date NOT NULL,
+    week            date NOT NULL,
+    month           text NOT NULL,
+    method          text NOT NULL,
+    path            text NOT NULL,
+    param_sig       text NOT NULL DEFAULT '',
+    total           bigint NOT NULL DEFAULT 0,
+    ok              bigint NOT NULL DEFAULT 0,
+    err             bigint NOT NULL DEFAULT 0,
+    ms_sum          bigint NOT NULL DEFAULT 0,
+    ms_max          integer NOT NULL DEFAULT 0,
+    last_seen       timestamptz NOT NULL DEFAULT now(),
+    UNIQUE (day, method, path, param_sig)
+);
+
+CREATE INDEX IF NOT EXISTS endpoint_stats_day_idx
+    ON public.endpoint_stats (day);
+
+CREATE INDEX IF NOT EXISTS endpoint_stats_week_idx
+    ON public.endpoint_stats (week);
+
+CREATE INDEX IF NOT EXISTS endpoint_stats_month_idx
+    ON public.endpoint_stats (month);
+
+CREATE INDEX IF NOT EXISTS endpoint_stats_path_day_idx
+    ON public.endpoint_stats (path, day);
+
+CREATE OR REPLACE FUNCTION public.bump_endpoint_stats(batch jsonb)
+RETURNS void
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public
+AS $$
+DECLARE
+    r jsonb;
+BEGIN
+    FOR r IN SELECT * FROM jsonb_array_elements(batch) LOOP
+        INSERT INTO public.endpoint_stats AS s
+            (day, week, month, method, path, param_sig,
+             total, ok, err, ms_sum, ms_max, last_seen)
+        VALUES (
+            (r->>'day')::date,
+            (r->>'week')::date,
+            r->>'month',
+            r->>'method',
+            r->>'path',
+            coalesce(r->>'param_sig', ''),
+            coalesce((r->>'total')::bigint, 0),
+            coalesce((r->>'ok')::bigint, 0),
+            coalesce((r->>'err')::bigint, 0),
+            coalesce((r->>'ms_sum')::bigint, 0),
+            coalesce((r->>'ms_max')::integer, 0),
+            now()
+        )
+        ON CONFLICT (day, method, path, param_sig) DO UPDATE SET
+            total = s.total + EXCLUDED.total,
+            ok = s.ok + EXCLUDED.ok,
+            err = s.err + EXCLUDED.err,
+            ms_sum = s.ms_sum + EXCLUDED.ms_sum,
+            ms_max = GREATEST(s.ms_max, EXCLUDED.ms_max),
+            week = EXCLUDED.week,
+            month = EXCLUDED.month,
+            last_seen = now();
+    END LOOP;
+END;
+$$;
+
+-- ------------------------------------------------------------
+-- 9. ENABLE ROW LEVEL SECURITY
+-- ------------------------------------------------------------
+
+ALTER TABLE public.cards ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.event_cards ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.catalog_state ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.sync_runs ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.system_logs ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.api_keys ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.endpoint_stats ENABLE ROW LEVEL SECURITY;
+
+-- ------------------------------------------------------------
+-- 10. EXPLICIT TABLE / FUNCTION PRIVILEGES
+-- ------------------------------------------------------------
+
+GRANT USAGE ON SCHEMA public TO service_role;
+
+GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE
+    public.cards,
+    public.event_cards,
+    public.catalog_state,
+    public.sync_runs,
+    public.system_logs,
+    public.api_keys,
+    public.endpoint_stats
+TO service_role;
+
+GRANT EXECUTE ON FUNCTION public.bump_endpoint_stats(jsonb)
+TO service_role;
+
+-- ------------------------------------------------------------
+-- 11. PRIVATE STORAGE BUCKET + STORAGE PERMISSIONS
+-- ------------------------------------------------------------
+
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM storage.buckets WHERE id = 'shoob-catalogs'
+    ) THEN
+        INSERT INTO storage.buckets (id, name, public)
+        VALUES ('shoob-catalogs', 'shoob-catalogs', false);
+        RAISE NOTICE 'SUCCESS: Created private bucket shoob-catalogs.';
+    ELSE
+        UPDATE storage.buckets
+        SET public = false
+        WHERE id = 'shoob-catalogs';
+        RAISE NOTICE 'INFO: Bucket shoob-catalogs already existed; kept private.';
+    END IF;
+EXCEPTION
+    WHEN OTHERS THEN
+        RAISE EXCEPTION
+            'FAILED to create/configure Storage bucket shoob-catalogs. SQLSTATE: %, Error: %',
+            SQLSTATE, SQLERRM;
+END;
+$$;
+
+GRANT USAGE ON SCHEMA storage TO service_role;
+GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE storage.objects TO service_role;
+GRANT SELECT ON TABLE storage.buckets TO service_role;
+
+-- No anon/authenticated Storage policies are created by this script.
+-- The bucket is configured as private.
+
+-- ------------------------------------------------------------
+-- 12. VERIFY REQUIRED OBJECTS AND PREVIEW-LINK COLUMNS
+-- ------------------------------------------------------------
+
+DO $$
+DECLARE
+    missing_objects text;
+BEGIN
+    SELECT string_agg(required_object, ', ')
+    INTO missing_objects
+    FROM (
+        VALUES
+            ('public.cards'),
+            ('public.event_cards'),
+            ('public.catalog_state'),
+            ('public.sync_runs'),
+            ('public.system_logs'),
+            ('public.api_keys'),
+            ('public.endpoint_stats')
+    ) AS required(required_object)
+    WHERE to_regclass(required_object) IS NULL;
+
+    IF missing_objects IS NOT NULL THEN
+        RAISE EXCEPTION
+            'SETUP VERIFICATION FAILED. Missing tables: %',
+            missing_objects;
+    END IF;
+
+    IF NOT EXISTS (
+        SELECT 1
+        FROM information_schema.columns
+        WHERE table_schema = 'public'
+          AND table_name = 'cards'
+          AND column_name = 'preview_link'
+          AND data_type = 'text'
+    ) THEN
+        RAISE EXCEPTION
+            'SETUP VERIFICATION FAILED. public.cards.preview_link is missing or has the wrong type.';
+    END IF;
+
+    IF NOT EXISTS (
+        SELECT 1
+        FROM information_schema.columns
+        WHERE table_schema = 'public'
+          AND table_name = 'event_cards'
+          AND column_name = 'preview_link'
+          AND data_type = 'text'
+    ) THEN
+        RAISE EXCEPTION
+            'SETUP VERIFICATION FAILED. public.event_cards.preview_link is missing or has the wrong type.';
+    END IF;
+
+    IF NOT EXISTS (
+        SELECT 1
+        FROM storage.buckets
+        WHERE id = 'shoob-catalogs'
+          AND public = false
+    ) THEN
+        RAISE EXCEPTION
+            'SETUP VERIFICATION FAILED. Private Storage bucket shoob-catalogs was not found.';
+    END IF;
+
+    RAISE NOTICE
+        'SUCCESS: Required tables, preview_link columns, and private Storage bucket verified.';
+END;
+$$;
+
+COMMIT;
+
+-- ------------------------------------------------------------
+-- 13. DISPLAY SETUP RESULTS
+-- ------------------------------------------------------------
+
+SELECT 'cards' AS object_name, to_regclass('public.cards') IS NOT NULL AS exists;
+SELECT 'event_cards' AS object_name, to_regclass('public.event_cards') IS NOT NULL AS exists;
+SELECT 'catalog_state' AS object_name, to_regclass('public.catalog_state') IS NOT NULL AS exists;
+SELECT 'sync_runs' AS object_name, to_regclass('public.sync_runs') IS NOT NULL AS exists;
+SELECT 'system_logs' AS object_name, to_regclass('public.system_logs') IS NOT NULL AS exists;
+SELECT 'api_keys' AS object_name, to_regclass('public.api_keys') IS NOT NULL AS exists;
+SELECT 'endpoint_stats' AS object_name, to_regclass('public.endpoint_stats') IS NOT NULL AS exists;
+
+SELECT table_name, column_name, data_type, is_nullable
+FROM information_schema.columns
+WHERE table_schema = 'public'
+  AND table_name IN ('cards', 'event_cards')
+  AND column_name IN ('id', 'event_slug', 'preview_link')
+ORDER BY table_name, ordinal_position;
+
+SELECT id AS bucket_id, name AS bucket_name, public AS is_public
+FROM storage.buckets
+WHERE id = 'shoob-catalogs';
+
+SELECT catalog, record_count, storage_path, status, metadata
+FROM public.catalog_state
+ORDER BY catalog;
+
+SELECT routine_name
+FROM information_schema.routines
+WHERE routine_schema = 'public'
+  AND routine_name = 'bump_endpoint_stats';
+
+-- If execution reaches these result queries, the setup transaction committed.
