@@ -1259,6 +1259,126 @@ async function startPreviewBackfillIfNeeded() {
   return previewBackfillPromise;
 }
 
+// Admin-only repair endpoint for records whose preview_link is null, empty, or whitespace.
+// Dry-run is the default. Mutations require { confirm: true } in the POST body.
+let previewRepairRunning = false;
+const PREVIEW_REPAIR_CONCURRENCY = 3;
+const PREVIEW_REPAIR_SCAN_BATCH = 1000;
+
+async function findMissingPreviewRows(catalog, limit = 100) {
+  const table = catalog === 'events' ? 'event_cards' : 'cards';
+  const columns = catalog === 'events' ? 'id,name,image_url,preview_link,event_slug' : 'id,name,image_url,preview_link';
+  const matches = [];
+  let offset = 0;
+  for (;;) {
+    let query = supabase.from(table).select(columns).order('id', { ascending: true }).range(offset, offset + PREVIEW_REPAIR_SCAN_BATCH - 1);
+    const { data, error } = await query;
+    if (error) throw error;
+    const rows = data || [];
+    for (const row of rows) {
+      if (typeof row.preview_link !== 'string' || !row.preview_link.trim()) {
+        matches.push(row);
+        if (matches.length >= limit) return { rows: matches, scanned: offset + rows.length, capped: true };
+      }
+    }
+    offset += rows.length;
+    if (rows.length < PREVIEW_REPAIR_SCAN_BATCH) break;
+  }
+  return { rows: matches, scanned: offset, capped: false };
+}
+
+app.post('/api/admin/preview-links/repair', requireAdmin, async (req, res) => {
+  if (!supabase) return res.status(503).json({ ok: false, error: 'Supabase is not configured.' });
+  if (previewRepairRunning) return res.status(409).json({ ok: false, error: 'A preview-link repair is already running.' });
+
+  const requested = String(req.body?.catalog || 'both').toLowerCase();
+  if (!['cards', 'events', 'both'].includes(requested)) {
+    return res.status(400).json({ ok: false, error: 'catalog must be cards, events, or both.' });
+  }
+  const rawLimit = Number(req.body?.limit ?? 100);
+  const limit = Number.isSafeInteger(rawLimit) && rawLimit > 0 ? Math.min(rawLimit, 500) : 100;
+  const dryRun = req.body?.confirm !== true;
+  const catalogs = requested === 'both' ? ['cards', 'events'] : [requested];
+  previewRepairRunning = true;
+
+  try {
+    const plan = {};
+    for (const catalog of catalogs) {
+      const found = await findMissingPreviewRows(catalog, limit);
+      plan[catalog] = { rows: found.rows, scanned: found.scanned, capped: found.capped };
+    }
+
+    const summary = {};
+    for (const catalog of catalogs) {
+      const { rows, scanned, capped } = plan[catalog];
+      summary[catalog] = {
+        scanned,
+        missingFound: rows.length,
+        capped,
+        dryRun,
+        ...(dryRun ? { sample: rows.slice(0, 25).map(row => ({ id: String(row.id), name: String(row.name || ''), ...(catalog === 'events' ? { event_slug: String(row.event_slug || 'unknown') } : {}) })) } : {})
+      };
+    }
+
+    if (dryRun) {
+      return res.json({
+        ok: true,
+        mode: 'dry-run',
+        message: 'No records changed. Send confirm: true to resolve and save missing preview links.',
+        limitPerCatalog: limit,
+        results: summary,
+        timestamps: getTimestamps(),
+      });
+    }
+
+    const results = {};
+    for (const catalog of catalogs) {
+      const rows = plan[catalog].rows;
+      let succeeded = 0;
+      let failed = 0;
+      const failures = [];
+      await mapWithConcurrency(rows, PREVIEW_REPAIR_CONCURRENCY, async row => {
+        const result = await resolveAndSavePreview(catalog, row, { backfill: true });
+        if (result.ok) succeeded++;
+        else {
+          failed++;
+          if (failures.length < 25) failures.push({ id: String(row.id), reason: String(result.reason || 'resolution_failed').slice(0, 200) });
+        }
+      });
+      if (succeeded > 0) {
+        if (catalog === 'cards') await rebuildMainStorage();
+        else await rebuildEventStorage();
+      }
+      results[catalog] = {
+        scanned: plan[catalog].scanned,
+        attempted: rows.length,
+        succeeded,
+        failed,
+        capped: plan[catalog].capped,
+        failures,
+      };
+    }
+
+    const hasFailures = Object.values(results).some(item => item.failed > 0);
+    logger.log(hasFailures ? 'WARN' : 'SUCCESS', 'preview-link', 'Admin preview-link repair finished', {
+      catalogs, limitPerCatalog: limit, results: Object.fromEntries(Object.entries(results).map(([name, value]) => [name, { attempted: value.attempted, succeeded: value.succeeded, failed: value.failed, capped: value.capped }]))
+    });
+    return res.status(hasFailures ? 207 : 200).json({
+      ok: !hasFailures,
+      mode: 'repair',
+      message: 'Repair pass finished. If capped is true, run another pass to process additional missing records.',
+      limitPerCatalog: limit,
+      results,
+      timestamps: getTimestamps(),
+    });
+  } catch (error) {
+    logger.log('ERROR', 'preview-link', 'Admin preview-link repair failed', { error: String(error?.message || error).slice(0, 300) });
+    return res.status(502).json({ ok: false, error: 'Preview-link repair failed.', detail: String(error?.message || error).slice(0, 300), timestamps: getTimestamps() });
+  } finally {
+    previewRepairRunning = false;
+  }
+});
+
 app.get('/api/link', requireApiKey, async (req, res) => {
   const startTime = Date.now();
   const base = () => ({ durationMs: Date.now() - startTime, timestamps: getTimestamps() });
