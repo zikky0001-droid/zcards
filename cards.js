@@ -19,7 +19,7 @@ const process = require("node:process");
 const { io } = require("socket.io-client");
 
 const SHOOB_URL = process.env.SHOOB_URL || "https://shoob.gg";
-const REQUEST_TIMEOUT = 30000; // milliseconds
+const REQUEST_TIMEOUT = 60000; // milliseconds
 
 // Public Cryptr secret derived from Shoob's browser bundle
 const SHOOB_ENCRYPTION_SECRET =
