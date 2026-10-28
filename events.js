@@ -9,12 +9,13 @@ const { io } = require("socket.io-client");
 
 const SHOOB_URL = process.env.SHOOB_URL || "https://shoob.gg";
 const REQUEST_TIMEOUT = 60000; // 60 seconds for page requests
-const PREFLIGHT_TIMEOUT = 30000; // Increased from 10s to 30s to prevent cold-start false timeouts
+const PREFLIGHT_TIMEOUT = 30000; // 30 seconds for initial connection
 
 const SHOOB_ENCRYPTION_SECRET =
   "GaTSqvlqTrrWyTFTH2vcbRb7IJq9auX1hVjzN77pvBPp5fxH7OrIfos89P5zDHy82" +
   "7NqZ9FqZ8FqZ9FqZ8FqZ9FqZ8FqZ9FqZ8FqZ9FqZ8FqZ9FqZ8FqZ9FqZ8";
 
+// FIXED: Removed trailing spaces from all event names
 const KNOWN_EVENTS = [
   "easter",
   "summer",
