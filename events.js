@@ -387,4 +387,3 @@ if (require.main === module) {
 module.exports = { ShoobEventScraper, groupCardsByEvent, KNOWN_EVENTS };
 
 // end of events.js 
-
