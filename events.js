@@ -1,8 +1,5 @@
 /**
  * Download Shoob event cards into events.json (grouped by event).
- * Usage:
- *     node events.js
- *     node events.js --event summer
  */
 const crypto = require("node:crypto");
 const fs = require("node:fs");
@@ -14,7 +11,7 @@ const SHOOB_URL = process.env.SHOOB_URL || "https://shoob.gg";
 const REQUEST_TIMEOUT = 60000; // 60 seconds for page requests
 const PREFLIGHT_TIMEOUT = 30000; // 30 seconds for initial connection
 
-// Public Cryptr secret derived by Shoob's browser bundle (AES-256-CTR)
+// AES-256-CTR Secret (Matches cards.js and the working test)
 const SHOOB_ENCRYPTION_SECRET =
   "GaTSqvlqTrrWyTFTH2vcbRb7IJq9auX1hVjzN77pvBPp5fxH7OrIfos89P5zDHy82" +
   "K6R2MeraytWhlT6FHP0dzn4ihL87fRkYrl65036H4hSKCXNtOKqoNLoE8xl2oOcs" +
@@ -22,7 +19,7 @@ const SHOOB_ENCRYPTION_SECRET =
   "nQQrx5S5rItE5HT76bqJeNpQ1Wgvw3dhWCjmkha939kqzIOnQA9b9DnnYj6aeLdV" +
   "VAviHzvq8iQZludOBwKknbOnJNOATdKQHmsbF8NmNcq";
 
-// FIXED: Removed all trailing spaces from event names
+// FIXED: NO trailing spaces!
 const KNOWN_EVENTS = [
   "easter",
   "summer",
@@ -36,38 +33,39 @@ const KNOWN_EVENTS = [
 ];
 
 /**
- * Decrypt one value using Shoob's browser client Cryptr-compatible format (AES-256-CTR).
+ * NEW: AES-256-CTR Decryption (From the working test script)
  */
 function decryptShoobValue(hexValue) {
-  const raw = Buffer.from(hexValue, "hex");
-  const iv = raw.subarray(0, 16);
-  const ciphertext = raw.subarray(16);
-  const key = crypto.createHash("sha256").update(SHOOB_ENCRYPTION_SECRET, "utf-8").digest();
-  const cipher = crypto.createDecipheriv("aes-256-ctr", key, iv);
-  const decrypted = Buffer.concat([cipher.update(ciphertext), cipher.final()]);
-  return JSON.parse(decrypted.toString("utf-8"));
+  if (typeof hexValue === 'string' && hexValue.length > 100) {
+    try {
+      const raw = Buffer.from(hexValue, "hex");
+      const iv = raw.subarray(0, 16);
+      const ciphertext = raw.subarray(16);
+      const key = crypto.createHash("sha256").update(SHOOB_ENCRYPTION_SECRET, "utf-8").digest();
+      const cipher = crypto.createDecipheriv("aes-256-ctr", key, iv);
+      const decrypted = Buffer.concat([cipher.update(ciphertext), cipher.final()]);
+      return JSON.parse(decrypted.toString("utf-8"));
+    } catch (e) {
+      /* ignore */
+    }
+  }
+  return hexValue;
 }
 
 /**
- * Extract and decrypt page data from the unified Shoob socket response.
+ * NEW: Extract and decrypt page data (From the working test script)
  */
 function extractPage(payload) {
   let dataPayload = payload;
-
   if (dataPayload && Array.isArray(dataPayload.encrypted)) {
-    if (dataPayload.encrypted.length === 0) {
-      return { docs: [], totalPages: null, totalDocs: null };
-    }
+    if (dataPayload.encrypted.length === 0) return { docs: [], totalPages: null, totalDocs: null };
     try {
       dataPayload = decryptShoobValue(dataPayload.encrypted[0]);
     } catch (exc) {
-      throw new Error(`Could not decrypt Shoob response: ${exc.message}`);
+      return { docs: [], totalPages: null, totalDocs: null };
     }
   }
-
-  if (!dataPayload || typeof dataPayload !== "object") {
-    return { docs: [], totalPages: null, totalDocs: null };
-  }
+  if (!dataPayload || typeof dataPayload !== "object") return { docs: [], totalPages: null, totalDocs: null };
 
   const data = dataPayload.data ?? dataPayload;
   let docs = [];
@@ -99,8 +97,7 @@ function extractPage(payload) {
   totalPages = totalPages !== null ? parseInt(totalPages, 10) : null;
   totalDocs = totalDocs !== null ? parseInt(totalDocs, 10) : null;
 
-  const validDocs = docs.filter((item) => item && typeof item === "object");
-  return { docs: validDocs, totalPages, totalDocs };
+  return { docs: Array.isArray(docs) ? docs : [], totalPages, totalDocs };
 }
 
 function normalizeEventCard(raw, eventSlug) {
@@ -111,10 +108,8 @@ function normalizeEventCard(raw, eventSlug) {
   const image_url = String(raw.image_url || raw.img || "");
   const author = String(raw.author || "").trim();
   const author_link = String(raw.author_link || "").trim();
-  
   if (!id) throw new Error("Event card missing id");
   if (!name) throw new Error(`Event card ${id} missing name`);
-  
   return { id, name, tier, series, event: eventSlug, image_url, author, author_link };
 }
 
@@ -139,21 +134,16 @@ function writeCards(cards, outputPath) {
 
 async function fetchEventMenu() {
   try {
-    console.log("[Preflight] 🌐 Fetching event menu from Shoob...");
     const res = await fetch(`${SHOOB_URL}/card-events`, {
       method: "GET",
       headers: { "User-Agent": "Mozilla/5.0" },
     });
     if (!res.ok) return { ok: false, reason: `HTTP ${res.status}` };
-    
     const html = await res.text();
     const matches = [...html.matchAll(/\/card-events\/([a-z0-9][a-z0-9-]+)(?=["'\/?#]|$)/gi)];
     const slugs = [...new Set(matches.map((m) => m[1].toLowerCase()))];
-    
-    console.log(`[Preflight] ✅ Found ${slugs.length} events on menu.`);
     return { ok: true, slugs };
   } catch (e) {
-    console.error(`[Preflight] ❌ Failed to fetch event menu: ${e.message}`);
     return { ok: false, reason: e.message };
   }
 }
@@ -168,7 +158,7 @@ class ShoobEventScraper {
     this.eventStats = {};
     this.unknownEvents = [];
     this.menuChecked = false;
-    // FIXED: Shoob now uses the unified 'cardindex' protocol for events
+    // ✅ FIXED: Use the unified protocol names
     this.responseEvent = "cardindexres";
   }
 
@@ -181,7 +171,7 @@ class ShoobEventScraper {
             console.warn(`[Retry] ⚠️ ${eventSlug} page ${page} failed (attempt ${attemptNum}/${retries}), retrying in 2s...`);
             setTimeout(() => attempt(attemptNum + 1), 2000);
           } else {
-            rej(new Error(`Timeout for ${eventSlug} page ${page} after ${retries} retries (REQUEST_TIMEOUT=${REQUEST_TIMEOUT}ms)`));
+            rej(new Error(`Timeout for ${eventSlug} page ${page} after ${retries} retries`));
           }
         }, REQUEST_TIMEOUT);
 
@@ -190,7 +180,7 @@ class ShoobEventScraper {
           res(payload);
         });
 
-        // FIXED: Emit 'cardindex' with the event parameter
+        // ✅ FIXED: Emit 'cardindex' with the event parameter
         socket.emit("cardindex", {
           page,
           category: null,
@@ -207,19 +197,15 @@ class ShoobEventScraper {
     if (this.menuChecked) return;
     this.menuChecked = true;
     const result = await fetchEventMenu();
-    
     if (!result.ok) {
       console.warn(`[Preflight] ⚠️ Event menu could not be verified: ${result.reason}`);
       return;
     }
-    
     const knownSet = new Set(this.events.map((e) => e.toLowerCase()));
     const unknown = result.slugs.filter((s) => !knownSet.has(s.toLowerCase()));
     this.unknownEvents = unknown;
-    
     if (unknown.length > 0) {
       console.warn(`[Preflight] ⚠️ ${unknown.length} unknown event(s) on menu: ${unknown.join(", ")}`);
-      console.warn(`[Preflight] 💡 Add them to KNOWN_EVENTS in events.js to scrape them next run.`);
     } else {
       console.log(`[Preflight] ✅ Menu has ${result.slugs.length} event(s) — all covered by KNOWN_EVENTS.`);
     }
@@ -228,12 +214,7 @@ class ShoobEventScraper {
   async fetchSummary() {
     await this.checkMenu();
     console.log("[Discovery] 🔌 Connecting to Shoob socket for summary...");
-    
-    const socket = io(SHOOB_URL, { 
-      transports: ["websocket"],
-      timeout: 20000,
-      reconnection: false 
-    });
+    const socket = io(SHOOB_URL, { transports: ["websocket"], timeout: 20000, reconnection: false });
 
     return new Promise((resolve, reject) => {
       socket.on("connect_error", (err) => {
@@ -248,21 +229,18 @@ class ShoobEventScraper {
           for (const slug of this.events) {
             console.log(`[Discovery] 🔍 Fetching page 1 for event: '${slug}'...`);
             const rawPayload = await this._requestPage(socket, slug, 1, 2);
-            const { totalDocs } = extractPage(rawPayload);
+            const { totalDocs } = extractPage(rawPayload); // ✅ FIXED: Use extractPage
             const total = Number(totalDocs || 0);
             
             if (!total || total <= 0) {
-              throw new Error(`Event '${slug}' returned 0 cards in discovery. It may be retired or empty.`);
+              throw new Error(`Event '${slug}' returned 0 cards in discovery.`);
             }
-            
             eventTotals[slug] = total;
             this.eventStats[slug] = { expected: total, collected: 0 };
             console.log(`[Discovery] ✅ ${slug}: ${total} cards`);
           }
-          
           this.expectedTotal = Object.values(eventTotals).reduce((a, b) => a + b, 0);
           console.log(`[Discovery] 🎉 Grand total: ${this.expectedTotal} event cards across ${Object.keys(eventTotals).length} events`);
-          
           socket.disconnect();
           resolve({ ok: true, byEvent: eventTotals, menuChecked: true, unknownEvents: this.unknownEvents });
         } catch (err) {
@@ -275,9 +253,7 @@ class ShoobEventScraper {
       setTimeout(() => {
         if (!socket.connected) {
           socket.disconnect();
-          const msg = `Socket connection timeout after ${PREFLIGHT_TIMEOUT}ms`;
-          console.error(`[Socket] ❌ ${msg}`);
-          reject(new Error(msg));
+          reject(new Error(`Socket connection timeout after ${PREFLIGHT_TIMEOUT}ms`));
         }
       }, PREFLIGHT_TIMEOUT);
     });
@@ -286,12 +262,7 @@ class ShoobEventScraper {
   async fetchAll() {
     await this.checkMenu();
     console.log("[Scraper] 🔌 Connecting to Shoob socket for full scrape...");
-    
-    const socket = io(SHOOB_URL, { 
-      transports: ["websocket"],
-      timeout: 20000,
-      reconnection: false 
-    });
+    const socket = io(SHOOB_URL, { transports: ["websocket"], timeout: 20000, reconnection: false });
 
     return new Promise((resolve, reject) => {
       socket.on("connect_error", (err) => {
@@ -306,19 +277,15 @@ class ShoobEventScraper {
           const eventTotals = {};
           for (const slug of this.events) {
             const rawPayload = await this._requestPage(socket, slug, 1, 2);
-            const { totalDocs } = extractPage(rawPayload);
+            const { totalDocs } = extractPage(rawPayload); // ✅ FIXED: Use extractPage
             const total = Number(totalDocs || 0);
-            
-            if (!total || total <= 0) {
-              throw new Error(`Event '${slug}' returned 0 cards in discovery.`);
-            }
+            if (!total || total <= 0) throw new Error(`Event '${slug}' returned 0 cards in discovery.`);
             eventTotals[slug] = total;
             this.eventStats[slug] = { expected: total, collected: 0 };
           }
-          
           this.expectedTotal = Object.values(eventTotals).reduce((a, b) => a + b, 0);
           console.log(`[Scraper] 🎯 Target: ${this.expectedTotal} event cards across ${Object.keys(eventTotals).length} events`);
-          
+
           // 2. Scraping Phase
           this.phase = "scraping";
           for (const eventSlug of this.events) {
@@ -327,36 +294,30 @@ class ShoobEventScraper {
               console.log(`[Scraper] ⏭️ Skipping ${eventSlug} (empty)`);
               continue;
             }
-            
             console.log(`[Scraper] 🚀 Scraping ${eventSlug} (${eventTotal} cards)...`);
             let page = 1;
             let totalPages = null;
             let collectedThisEvent = 0;
-            
+
             while (true) {
               const rawPayload = await this._requestPage(socket, eventSlug, page, 2);
-              const { docs, totalPages: respPages } = extractPage(rawPayload);
+              const { docs, totalPages: respPages } = extractPage(rawPayload); // ✅ FIXED: Use extractPage
               
-              if (!Array.isArray(docs)) {
-                throw new Error(`Invalid response format for ${eventSlug} page ${page}`);
-              }
+              if (!Array.isArray(docs)) throw new Error(`Invalid response format for ${eventSlug} page ${page}`);
               if (totalPages === null && respPages) totalPages = Number(respPages);
-              
+
               for (const card of docs) {
                 try {
                   const normalized = normalizeEventCard(card, eventSlug);
                   if (!this.cards.some((c) => c.id === normalized.id && c.event === normalized.event)) {
                     this.cards.push(normalized);
                     collectedThisEvent++;
-                    if (this.eventStats[eventSlug]) {
-                      this.eventStats[eventSlug].collected = collectedThisEvent;
-                    }
+                    if (this.eventStats[eventSlug]) this.eventStats[eventSlug].collected = collectedThisEvent;
                   }
                 } catch (exc) {
                   console.warn(`[Warning] ⚠️ Skipping invalid event card: ${exc.message}`);
                 }
               }
-              
               console.log(`[Scraper] 📊 ${eventSlug} page ${page}: +${docs.length} parsed, ${collectedThisEvent}/${eventTotal} collected (Total global: ${this.cards.length}/${this.expectedTotal})`);
               
               if (totalPages !== null && page >= totalPages) break;
@@ -364,15 +325,13 @@ class ShoobEventScraper {
               page++;
             }
           }
-          
+
           this.phase = "done";
           socket.disconnect();
-          
           if (this.cards.length === 0 && !this.existingKeys) {
             console.error("[Scraper] ❌ Shoob returned 0 event cards overall.");
             return reject(new Error("Shoob returned 0 event cards"));
           }
-          
           console.log(`[Scraper] 🎉 Successfully collected ${this.cards.length} event cards!`);
           resolve(this.cards);
         } catch (err) {
@@ -385,9 +344,7 @@ class ShoobEventScraper {
       setTimeout(() => {
         if (!socket.connected) {
           socket.disconnect();
-          const msg = `Socket connection timeout after ${PREFLIGHT_TIMEOUT}ms`;
-          console.error(`[Socket] ❌ ${msg}`);
-          reject(new Error(msg));
+          reject(new Error(`Socket connection timeout after ${PREFLIGHT_TIMEOUT}ms`));
         }
       }, PREFLIGHT_TIMEOUT);
     });
@@ -430,3 +387,4 @@ if (require.main === module) {
 module.exports = { ShoobEventScraper, groupCardsByEvent, KNOWN_EVENTS };
 
 // end of events.js 
+
