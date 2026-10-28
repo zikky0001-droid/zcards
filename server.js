@@ -1,4 +1,3 @@
-
 // server.js
 'use strict';
 
@@ -54,7 +53,6 @@ if (process.env.SUPABASE_URL && process.env.SUPABASE_SERVICE_ROLE_KEY) {
 const stats = createStatsTracker({ getSupabase: () => supabase, logger });
 
 // Mount the stats middleware immediately after static files
-// It will record all /api/* routes except /api/health, /ping, and self-pings
 app.use(stats.middleware);
 
 const state = {
@@ -234,12 +232,16 @@ function requireInternalOrAdmin(req, res, next) {
 
 // --- API Key Protection Middleware ---
 function requireApiKey(req, res, next) {
-  const providedKey = req.query.key ? String(req.query.key) : '';
+  // Key may come from ?key=..., or from the x-api-key / x-admin-key headers (keeps it out of URLs/logs).
+  const providedKey = req.query.key
+    ? String(req.query.key)
+    : String(req.get('x-api-key') || req.get('x-admin-key') || '');
 
   if (!providedKey) {
+    req.skipStatsTracking = true;
     return res.status(401).json({
       ok: false,
-      error: 'API key is required. Append &key=YOUR_KEY to the URL.'
+      error: 'Your API key is required. add  &key=YOUR_KEY to the URL.'
     });
   }
 
@@ -248,13 +250,14 @@ function requireApiKey(req, res, next) {
     : [];
   
   const adminKey = process.env.ADMIN_KEY;
-  const isValidApiKey = validApiKeys.includes(providedKey);
+  const isValidApiKey = validApiKeys.some(k => safeEqual(providedKey, k));
   const isAdminKey = adminKey ? safeEqual(providedKey, adminKey) : false;
 
   if (isValidApiKey || isAdminKey) {
     return next();
   }
 
+  req.skipStatsTracking = true;
   return res.status(403).json({
     ok: false,
     error: 'Invalid API key.'
@@ -264,7 +267,7 @@ function requireApiKey(req, res, next) {
 function rowsForCards(cards) {
   return cards.map(c => ({
     id: String(c.id), name: String(c.name || 'Unknown'), tier: c.tier == null ? null : String(c.tier),
-    series: c.series || '', image_url: c.image_url || null, author: c.author || 'Anonymous',
+    series: c.series || '', image_url: c.image_url || null, preview_link: c.preview_link || null, author: c.author || 'Anonymous',
     author_link: c.author_link || 'Hidden', synced_at: new Date().toISOString(),
   }));
 }
@@ -288,12 +291,26 @@ async function saveStorage(filename, value) {
   if (error) throw error;
 }
 
+async function readCatalogMetadata(catalog) {
+  const { data, error } = await supabase.from('catalog_state').select('metadata').eq('catalog', catalog).maybeSingle();
+  if (error) throw error;
+  return data?.metadata && typeof data.metadata === 'object' ? data.metadata : {};
+}
+
+async function updateCatalogState(catalog, patch, metadataPatch = null) {
+  const update = { ...patch };
+  if (metadataPatch) update.metadata = { ...(await readCatalogMetadata(catalog)), ...metadataPatch };
+  const { error } = await supabase.from('catalog_state').update(update).eq('catalog', catalog);
+  if (error) throw error;
+}
+
 async function saveCatalogState(catalog, count, status, error = null, metadata = {}) {
   const storagePath = catalog === 'cards' ? 'cards.json' : 'events.json';
+  const mergedMetadata = { ...(await readCatalogMetadata(catalog)), ...metadata };
   const row = {
     catalog, record_count: count, storage_path: storagePath, last_checked_at: new Date().toISOString(),
     last_synced_at: status === 'ready' ? new Date().toISOString() : undefined,
-    last_error: error ? String(error).slice(0, 1000) : null, status, metadata,
+    last_error: error ? String(error).slice(0, 1000) : null, status, metadata: mergedMetadata,
   };
   const { error: dbError } = await supabase.from('catalog_state').upsert(row, { onConflict: 'catalog' });
   if (dbError) throw dbError;
@@ -339,7 +356,7 @@ async function recordNoopRun(catalog, trigger, sourceTotal, dbCount, metadata = 
 async function rebuildMainStorage() {
   const rows = await readAllRows('cards');
   await saveStorage('cards.json', rows.map(r => ({
-    id: String(r.id), name: r.name, tier: r.tier, series: r.series || '', image_url: r.image_url, author: r.author, author_link: r.author_link,
+    id: String(r.id), name: r.name, tier: r.tier, series: r.series || '', image_url: r.image_url, preview_link: r.preview_link || null, author: r.author, author_link: r.author_link,
   })));
   state.cards.storage = 'available';
 }
@@ -351,7 +368,7 @@ async function rebuildEventStorage() {
     const slug = String(row.event_slug || 'unknown');
     if (!grouped[slug]) grouped[slug] = [];
     grouped[slug].push({
-      id: String(row.id), name: row.name, tier: row.tier, series: row.series || '', event: slug, image_url: row.image_url, author: row.author, author_link: row.author_link,
+      id: String(row.id), name: row.name, tier: row.tier, series: row.series || '', event: slug, image_url: row.image_url, preview_link: row.preview_link || null, author: row.author, author_link: row.author_link,
     });
   }
   await saveStorage('events.json', grouped);
@@ -369,6 +386,7 @@ async function syncMain(cards, trigger, sourceTotal = null) {
   if (run.error) throw run.error;
   try {
     await upsertBatches('cards', rowsForCards(clean));
+    await mapWithConcurrency(clean, PREVIEW_BACKFILL_CONCURRENCY, card => resolveAndSavePreview('cards', card));
     const dbCount = await countRows('cards');
     await rebuildMainStorage();
     await saveCatalogState('cards', dbCount, 'ready', null, { trigger, sourceTotal, mode: 'incremental', recordsAdded: clean.length });
@@ -398,8 +416,9 @@ async function syncEvents(cards, trigger, scraper = null, sourceTotal = null) {
   if (run.error) throw run.error;
   try {
     const eventRows = rowsForEvents(clean);
-    const { error: upsertError } = await supabase.from('event_cards').upsert(eventRows, { onConflict: 'id,event_slug' });
+    const { error: upsertError } = await supabase.from('event_cards').upsert(eventRows, { onConflict: 'id' });
     if (upsertError) throw upsertError;
+    await mapWithConcurrency(clean, PREVIEW_BACKFILL_CONCURRENCY, card => resolveAndSavePreview('events', { ...card, event_slug: card.event || card.event_slug || 'unknown' }));
     const dbRows = await readAllRows('event_cards', 'id,event_slug');
     const dbCount = dbRows.length;
     await rebuildEventStorage();
@@ -437,9 +456,7 @@ async function scrapeMainAndSync(trigger) {
     if (summary.total === dbCount) {
       if (state.cards.storage !== 'available') await rebuildMainStorage();
       await recordNoopRun('cards', trigger, summary.total, dbCount);
-      await supabase.from('catalog_state').update({
-        last_checked_at: new Date().toISOString(), status: 'ready', last_error: null, metadata: { trigger, mode: 'count-match-noop', sourceTotal: summary.total },
-      }).eq('catalog', 'cards');
+      await updateCatalogState('cards', { last_checked_at: new Date().toISOString(), status: 'ready', last_error: null }, { trigger, mode: 'count-match-noop', sourceTotal: summary.total });
       state.cards.count = dbCount; state.cards.error = null; state.cards.countsMatch = true;
     } else {
       const existingRows = await readAllRows('cards', 'id');
@@ -450,9 +467,7 @@ async function scrapeMainAndSync(trigger) {
       if (!missing.length) {
         const note = `ZCard total ${summary.total} differs from Supabase ${dbCount}, but no missing IDs were found.`;
         await recordNoopRun('cards', trigger, summary.total, dbCount, { mode: 'count-mismatch-no-missing-ids', warning: note });
-        await supabase.from('catalog_state').update({
-          last_checked_at: new Date().toISOString(), status: 'ready', last_error: note, metadata: { trigger, sourceTotal: summary.total, databaseCount: dbCount, warning: note },
-        }).eq('catalog', 'cards');
+        await updateCatalogState('cards', { last_checked_at: new Date().toISOString(), status: 'ready', last_error: note }, { trigger, sourceTotal: summary.total, databaseCount: dbCount, warning: note });
         state.cards.count = dbCount; state.cards.countsMatch = false;
       } else {
         if (dbCount > 0 && missing.length > Math.max(5000, summary.total * 0.35)) throw new Error(`Safety stop: ${missing.length} missing cards is an unexpectedly large delta`);
@@ -486,9 +501,7 @@ async function scrapeEventsAndSync(trigger) {
     if (allMatch) {
       if (state.events.storage !== 'available') await rebuildEventStorage();
       await recordNoopRun('events', trigger, summary.total, dbRows.length, { byEvent: summary.byEvent });
-      await supabase.from('catalog_state').update({
-        last_checked_at: new Date().toISOString(), status: 'ready', last_error: null, metadata: { trigger, mode: 'per-event-count-match', sourceTotal: summary.total, byEvent: summary.byEvent },
-      }).eq('catalog', 'events');
+      await updateCatalogState('events', { last_checked_at: new Date().toISOString(), status: 'ready', last_error: null }, { trigger, mode: 'per-event-count-match', sourceTotal: summary.total, byEvent: summary.byEvent });
       state.events.count = dbRows.length; state.events.error = null; state.events.countsMatch = true;
     } else {
       const scraper = new ShoobEventScraper({ existingKeys });
@@ -497,9 +510,7 @@ async function scrapeEventsAndSync(trigger) {
       if (!missing.length) {
         const note = 'Per-event source and database counts differ, but no missing event/card pairs were found.';
         await recordNoopRun('events', trigger, summary.total, dbRows.length, { mode: 'count-mismatch-no-missing-ids', warning: note, byEvent: summary.byEvent });
-        await supabase.from('catalog_state').update({
-          last_checked_at: new Date().toISOString(), status: 'ready', last_error: note, metadata: { trigger, sourceTotal: summary.total, databaseCount: dbRows.length, warning: note, byEvent: summary.byEvent },
-        }).eq('catalog', 'events');
+        await updateCatalogState('events', { last_checked_at: new Date().toISOString(), status: 'ready', last_error: note }, { trigger, sourceTotal: summary.total, databaseCount: dbRows.length, warning: note, byEvent: summary.byEvent });
         state.events.count = dbRows.length; state.events.countsMatch = false;
       } else {
         if (dbRows.length > 0 && missing.length > Math.max(2000, summary.total * 0.5)) throw new Error(`Safety stop: ${missing.length} missing event-card pairs is an unexpectedly large delta`);
@@ -511,21 +522,13 @@ async function scrapeEventsAndSync(trigger) {
     state.events.finishedAt = new Date().toISOString();
   } catch (e) {
     state.events.error = e.message || String(e);
-    const unknownMatch = state.events.error.match(/New (?:Shoob|ZCard) event(s) need to be added before syncing: (.+)$/);
+    const unknownMatch = state.events.error.match(/New (?:Shoob|ZCard) event\(s\) need to be added before syncing: (.+)$/);
     if (unknownMatch) {
       state.events.menuChecked = true;
       state.events.unknownEvents = unknownMatch[1].split(',').map(x => x.trim()).filter(Boolean);
     } else if (/event menu could not be verified/i.test(state.events.error)) {
       state.events.menuChecked = false; state.events.menuError = state.events.error;
     }
-    
-    // Log the exact stack trace so we know WHERE the error happened
-    const stackTrace = e.stack ? e.stack.split('\n').slice(0, 3).join(' | ') : 'No stack trace';
-    logger.log('ERROR', 'scraper-events', 'Event incremental check failed', { 
-      error: state.events.error, 
-      stackTrace,
-      unknownEvents: state.events.unknownEvents 
-    });
   } finally {
     state.events.isScraping = false;
   }
@@ -558,6 +561,7 @@ async function monitorOnce() {
     state.events.count = events.dbCount; state.events.storage = events.storageExists ? 'available' : 'missing';
     state.events.lastSyncAt = events.stateRow?.last_synced_at || state.events.lastSyncAt;
     state.events.sourceTotal = events.stateRow?.metadata?.sourceTotal ?? state.events.sourceTotal;
+    void startPreviewBackfillIfNeeded();
     if (!main.present && !state.cards.isScraping) void scrapeMainAndSync('startup-recovery');
     if (!events.present && !state.events.isScraping) void scrapeEventsAndSync('startup-recovery');
   } catch (e) {
@@ -832,6 +836,34 @@ app.post('/api/internal/logs', requireInternalOrAdmin, (req, res) => {
 // -----------------------------------------------------------------------------
 
 app.get('/api/stats', requireApiKey, stats.handler);
+app.get('/api/stats/recent', requireApiKey, stats.recentHandler);
+
+// Full catalogue downloads. Only the two documented names are accepted.
+app.get('/api/download', requireApiKey, async (req, res) => {
+  if (!supabase) return res.status(503).json({ ok: false, error: 'Catalog storage unavailable' });
+  const file = String(req.query.file || '').toLowerCase();
+  if (!['cards', 'events'].includes(file)) {
+    return res.status(400).json({ ok: false, error: 'Invalid file parameter. Use file=cards or file=events.', usage: '/api/download?file=cards&key=YOUR_KEY' });
+  }
+  const filename = `${file}.json`;
+  try {
+    const bucket = supabase.storage.from(process.env.SUPABASE_STORAGE_BUCKET || 'shoob-catalogs');
+    const { data, error } = await bucket.download(filename);
+    if (error) throw error;
+    if (!data) return res.status(404).json({ ok: false, error: `${filename} is not available yet.` });
+    const buffer = Buffer.from(await data.arrayBuffer());
+    res.set({
+      'Content-Type': 'application/json; charset=utf-8',
+      'Content-Disposition': `attachment; filename="${filename}"`,
+      'Cache-Control': 'private, no-store, max-age=0',
+      'X-Content-Type-Options': 'nosniff',
+    });
+    return res.status(200).send(buffer);
+  } catch (error) {
+    logger.log('ERROR', 'download', 'Full catalogue download failed', { file, error: String(error?.message || error).slice(0, 300) });
+    return res.status(502).json({ ok: false, error: `Could not download ${filename} from catalogue storage.` });
+  }
+});
 
 app.get('/api/cards', requireApiKey, async (req, res) => {
   if (!supabase) return res.status(503).json({ ok: false, error: 'Catalog database unavailable' });
@@ -939,6 +971,502 @@ app.get('/api/series', requireApiKey, async (req, res) => {
   }
 });
 
+// -----------------------------------------------------------------------------
+// GET /api/link — resolve a Shoob card link to its final CDN media URL
+// BEGIN /api/link
+// -----------------------------------------------------------------------------
+
+const SHOOB_API_HOST = 'api.shoob.gg';
+const SHOOB_PAGE_HOSTS = new Set(['shoob.gg', 'www.shoob.gg']);
+const SHOOB_MEDIA_HOSTS = new Set(['cdn.shoob.gg']); // hosts we accept as the final file location
+const SHOOB_CARD_ID_RE = /^[0-9a-f]{24}$/i;
+const SHOOB_CARDR_PATH_RE = /^\/site\/api\/cardr\/([0-9a-f]{24})\/?$/i;
+const LINK_TIMEOUT_MS = 10_000;
+const LINK_CACHE_TTL_MS = 10 * 60 * 1000;
+const LINK_CACHE_MAX = 500;
+const LINK_RATE_WINDOW_MS = 60_000;
+const LINK_RATE_MAX = 30; // uncached lookups per IP per minute (protects your server's IP with Shoob)
+const LINK_USER_AGENT = 'Mozilla/5.0 (compatible; ZCard-Control-Room/1.0)';
+
+const LINK_MEDIA_TYPES = {
+  mp4: { media: 'video', mime: 'video/mp4' },
+  webm: { media: 'video', mime: 'video/webm' },
+  gif: { media: 'image', mime: 'image/gif' },
+  png: { media: 'image', mime: 'image/png' },
+  jpg: { media: 'image', mime: 'image/jpeg' },
+  jpeg: { media: 'image', mime: 'image/jpeg' },
+  webp: { media: 'image', mime: 'image/webp' },
+};
+
+const linkCache = new Map(); // "<id>|<size>" -> { value, expires }
+const linkRate = new Map();  // ip -> { count, resetAt }
+
+function linkError(status, message) {
+  const err = new Error(message);
+  err.status = status;
+  return err;
+}
+
+// Strictly parse a user-supplied Shoob URL. Returns null when it is not one.
+// The host is compared EXACTLY after URL parsing, so lookalikes such as
+// https://shoob.gg.evil.com, https://evil.com/?shoob.gg or https://shoob.gg@evil.com all fail.
+// The outgoing request is always rebuilt from the validated pieces, never from the raw input.
+function parseShoobUrl(raw) {
+  if (typeof raw !== 'string') return null;
+  const input = raw.trim();
+  if (!input || input.length > 2048) return null;
+  let u;
+  try { u = new URL(input); } catch { return null; }
+  if (u.protocol !== 'https:' && u.protocol !== 'http:') return null;
+  if (u.username || u.password || u.port) return null;
+  const host = u.hostname.toLowerCase();
+
+  if (host === SHOOB_API_HOST) {
+    const m = SHOOB_CARDR_PATH_RE.exec(u.pathname);
+    if (!m) return null;
+    const sizeRaw = u.searchParams.get('size');
+    const size = sizeRaw && /^\d{1,4}$/.test(sizeRaw) && Number(sizeRaw) > 0 ? Number(sizeRaw) : null;
+    return { kind: 'card', id: m[1].toLowerCase(), size };
+  }
+  if (SHOOB_PAGE_HOSTS.has(host)) {
+    const id = u.pathname.split('/').find(seg => SHOOB_CARD_ID_RE.test(seg));
+    if (!id) return null;
+    return { kind: 'card', id: id.toLowerCase(), size: null };
+  }
+  if (SHOOB_MEDIA_HOSTS.has(host)) {
+    return { kind: 'media', url: `https://${host}${u.pathname}${u.search}` };
+  }
+  return null;
+}
+
+function describeMedia(mediaUrl) {
+  const m = /\.([a-z0-9]{2,5})$/i.exec(new URL(mediaUrl).pathname);
+  const ext = m ? m[1].toLowerCase() : null;
+  const info = ext ? LINK_MEDIA_TYPES[ext] : null;
+  return { type: ext || 'unknown', media: info ? info.media : 'unknown', mime: info ? info.mime : null };
+}
+
+function linkCacheGet(key) {
+  const hit = linkCache.get(key);
+  if (!hit) return null;
+  if (hit.expires <= Date.now()) { linkCache.delete(key); return null; }
+  return hit.value;
+}
+
+function linkCacheSet(key, value) {
+  if (linkCache.size >= LINK_CACHE_MAX) linkCache.delete(linkCache.keys().next().value);
+  linkCache.set(key, { value, expires: Date.now() + LINK_CACHE_TTL_MS });
+}
+
+// Returns 0 when allowed, otherwise the number of seconds to wait.
+function linkRateCheck(ip) {
+  const now = Date.now();
+  if (linkRate.size > 2000) {
+    for (const [k, v] of linkRate) if (v.resetAt <= now) linkRate.delete(k);
+  }
+  const entry = linkRate.get(ip);
+  if (!entry || entry.resetAt <= now) {
+    linkRate.set(ip, { count: 1, resetAt: now + LINK_RATE_WINDOW_MS });
+    return 0;
+  }
+  if (entry.count >= LINK_RATE_MAX) return Math.max(1, Math.ceil((entry.resetAt - now) / 1000));
+  entry.count += 1;
+  return 0;
+}
+
+// Ask Shoob where a card image lives. Redirects are NOT followed: we only read the
+// Location header (like `curl` without -L) and never download the image.
+async function resolveShoobCard(id, size) {
+  const target = `https://${SHOOB_API_HOST}/site/api/cardr/${id}${size ? `?size=${size}` : ''}`;
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), LINK_TIMEOUT_MS);
+  try {
+    const response = await fetch(target, {
+      method: 'GET',
+      redirect: 'manual',
+      signal: controller.signal,
+      headers: { 'user-agent': LINK_USER_AGENT, accept: '*/*' },
+    });
+    try { await response.body?.cancel(); } catch { /* ignore */ }
+
+    if (response.status >= 300 && response.status < 400) {
+      const location = response.headers.get('location');
+      if (!location) throw linkError(502, 'Shoob redirected without a target');
+      let finalUrl;
+      try { finalUrl = new URL(location, target); } catch { throw linkError(502, 'Shoob returned an invalid redirect'); }
+      if (finalUrl.protocol !== 'https:' || finalUrl.username || finalUrl.password || finalUrl.port ||
+          !SHOOB_MEDIA_HOSTS.has(finalUrl.hostname.toLowerCase())) {
+        throw linkError(502, 'Shoob redirected to an unexpected host');
+      }
+      return finalUrl.toString();
+    }
+    if (response.status === 404) throw linkError(404, 'Card not found on Shoob');
+    if (response.status === 200) throw linkError(502, 'Shoob did not return a redirect');
+    throw linkError(502, `Shoob responded with HTTP ${response.status}`);
+  } catch (error) {
+    if (error && error.status) throw error;
+    if (error && error.name === 'AbortError') throw linkError(504, 'Shoob request timed out');
+    throw linkError(502, 'Could not reach Shoob');
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+// Persistent preview-link backfill. Progress lives in catalog_state.metadata so it survives Render restarts.
+const PREVIEW_BACKFILL_BATCH = 100;
+const PREVIEW_BACKFILL_CONCURRENCY = 3;
+let previewBackfillPromise = null;
+let previewBackfillStartedThisProcess = false;
+
+async function mapWithConcurrency(items, concurrency, worker) {
+  let next = 0;
+  const runners = Array.from({ length: Math.min(concurrency, items.length) }, async () => {
+    while (true) {
+      const index = next++;
+      if (index >= items.length) return;
+      await worker(items[index], index);
+    }
+  });
+  await Promise.all(runners);
+}
+
+function sourceCardUrl(row) {
+  const candidate = row?.image_url;
+  const parsed = parseShoobUrl(candidate);
+  if (parsed?.kind === 'card') return { id: parsed.id, size: parsed.size || 700 };
+  if (parsed?.kind === 'media') return { directUrl: parsed.url };
+  if (SHOOB_CARD_ID_RE.test(String(row?.id || ''))) return { id: String(row.id), size: 700 };
+  return null;
+}
+
+async function resolveAndSavePreview(catalog, row, { backfill = false } = {}) {
+  const table = catalog === 'cards' ? 'cards' : 'event_cards';
+  const label = catalog === 'events' ? { event: row.event_slug || 'unknown' } : {};
+  const already = typeof row.preview_link === 'string' && row.preview_link.startsWith('https://cdn.shoob.gg/');
+  if (already) return { ok: true, cached: true, skipped: true };
+  const source = sourceCardUrl(row);
+  if (!source) {
+    logger.log('WARN', 'preview-link', 'Preview link skipped: no valid Shoob source URL or card ID', { catalog, cardId: row.id, ...label, backfill });
+    return { ok: false, reason: 'invalid_source_url' };
+  }
+  try {
+    const url = source.directUrl || await resolveShoobCard(source.id, source.size || 700);
+    let parsedUrl;
+    try { parsedUrl = new URL(url); } catch { throw new Error('Resolved URL is invalid'); }
+    // For preview_link repair, Shoob's CDN URL is authoritative even when its
+    // path has no file extension (e.g. /1605056309192.Christmas%202020).
+    // Keep the exact HTTPS hostname check; never accept substring/lookalike hosts.
+    if (parsedUrl.protocol !== 'https:' || parsedUrl.hostname.toLowerCase() !== 'cdn.shoob.gg' || parsedUrl.username || parsedUrl.password || parsedUrl.port) {
+      throw new Error('Resolved URL is not an approved Shoob CDN URL');
+    }
+    const info = describeMedia(url);
+    const { error } = await supabase.from(table).update({ preview_link: url }).eq('id', String(row.id));
+    if (error) throw error;
+    logger.log('SUCCESS', 'preview-link', 'Preview link resolved and saved', {
+      catalog, cardId: String(row.id), ...label, type: info.type, media: info.media, cached: false, backfill,
+    });
+    return { ok: true, url, type: info.type, media: info.media };
+  } catch (error) {
+    logger.log('WARN', 'preview-link', 'Preview link resolution failed; card retained and may be retried', {
+      catalog, cardId: String(row.id), ...label, reason: String(error?.message || error).slice(0, 300), retryable: true, backfill,
+    });
+    return { ok: false, reason: String(error?.message || error) };
+  }
+}
+
+async function persistBackfillState(catalog, patch) {
+  const current = await readCatalogMetadata(catalog);
+  const prior = current.preview_link_backfill && typeof current.preview_link_backfill === 'object' ? current.preview_link_backfill : {};
+  const next = { ...prior, ...patch, updated_at: new Date().toISOString() };
+  await updateCatalogState(catalog, {}, { preview_link_backfill: next });
+  state.previewLinkBackfill[catalog] = {
+    status: next.status || 'waiting', completed: next.completed === true,
+    processed: Number(next.processed || 0), succeeded: Number(next.succeeded || 0), failed: Number(next.failed || 0),
+    cursor: next.cursor || null, startedAt: next.started_at || null, finishedAt: next.finished_at || null, lastError: next.last_error || null,
+  };
+  return next;
+}
+
+async function runPreviewBackfillForCatalog(catalog) {
+  const table = catalog === 'cards' ? 'cards' : 'event_cards';
+  let metadata = await readCatalogMetadata(catalog);
+  let job = metadata.preview_link_backfill || {};
+  if (job.completed === true) {
+    state.previewLinkBackfill[catalog] = {
+      status: 'completed', completed: true, processed: Number(job.processed || 0), succeeded: Number(job.succeeded || 0),
+      failed: Number(job.failed || 0), cursor: job.cursor || null, startedAt: job.started_at || null, finishedAt: job.finished_at || null, lastError: null,
+    };
+    logger.log('INFO', 'preview-link', 'One-time preview-link backfill already completed; skipping', { catalog, processed: Number(job.processed || 0), failed: Number(job.failed || 0) });
+    return;
+  }
+
+  const startedAt = job.started_at || new Date().toISOString();
+  let processed = Number(job.processed || 0);
+  let succeeded = Number(job.succeeded || 0);
+  let failed = Number(job.failed || 0);
+  let cursor = job.cursor || null;
+  await persistBackfillState(catalog, { status: 'running', completed: false, started_at: startedAt, finished_at: null, processed, succeeded, failed, cursor, last_error: null });
+  logger.log('INFO', 'preview-link', 'One-time preview-link backfill started/resumed', { catalog, processed, succeeded, failed, cursor, batchSize: PREVIEW_BACKFILL_BATCH, concurrency: PREVIEW_BACKFILL_CONCURRENCY });
+
+  try {
+    for (;;) {
+      const columns = catalog === 'events' ? 'id,image_url,preview_link,event_slug' : 'id,image_url,preview_link';
+      let query = supabase.from(table).select(columns).order('id', { ascending: true }).limit(PREVIEW_BACKFILL_BATCH);
+      if (cursor) query = query.gt('id', cursor);
+      const { data, error } = await query;
+      if (error) throw error;
+      const rows = data || [];
+      if (!rows.length) break;
+      let batchSucceeded = 0;
+      let batchFailed = 0;
+      await mapWithConcurrency(rows, PREVIEW_BACKFILL_CONCURRENCY, async row => {
+        if (typeof row.preview_link === 'string' && row.preview_link.startsWith('https://cdn.shoob.gg/')) {
+          batchSucceeded++;
+          return;
+        }
+        const result = await resolveAndSavePreview(catalog, row, { backfill: true });
+        if (result.ok) batchSucceeded++;
+        else batchFailed++;
+      });
+      processed += rows.length;
+      succeeded += batchSucceeded;
+      failed += batchFailed;
+      cursor = String(rows[rows.length - 1].id);
+      await persistBackfillState(catalog, { status: 'running', completed: false, started_at: startedAt, processed, succeeded, failed, cursor, last_error: null });
+      logger.log('INFO', 'preview-link', 'Preview-link backfill progress', { catalog, processed, succeeded, failed, lastCardId: cursor, batchSize: rows.length });
+    }
+
+    // Publish the populated preview_link values into the downloadable JSON snapshot before marking done.
+    if (catalog === 'cards') await rebuildMainStorage();
+    else await rebuildEventStorage();
+    const finishedAt = new Date().toISOString();
+    await persistBackfillState(catalog, { status: failed ? 'completed_with_failures' : 'completed', completed: true, started_at: startedAt, finished_at: finishedAt, processed, succeeded, failed, cursor, last_error: null });
+    logger.log(failed ? 'WARN' : 'SUCCESS', 'preview-link', 'One-time preview-link backfill finished', {
+      catalog, completed: true, processed, succeeded, failed, startedAt, finishedAt,
+      note: failed ? 'Scan completed; unresolved records remain blank and are not automatically rescanned by this one-time job.' : 'All scanned records have a saved preview link or were already resolved.',
+    });
+  } catch (error) {
+    await persistBackfillState(catalog, { status: 'failed', completed: false, started_at: startedAt, processed, succeeded, failed, cursor, last_error: String(error?.message || error).slice(0, 500) }).catch(() => {});
+    logger.log('ERROR', 'preview-link', 'Preview-link backfill interrupted; it will resume after restart', { catalog, processed, succeeded, failed, cursor, error: String(error?.message || error).slice(0, 300) });
+    throw error;
+  }
+}
+
+async function startPreviewBackfillIfNeeded() {
+  if (!supabase || !state.supabaseReachable || previewBackfillPromise || previewBackfillStartedThisProcess) return;
+  previewBackfillStartedThisProcess = true;
+  previewBackfillPromise = (async () => {
+    for (const catalog of ['cards', 'events']) {
+      await runPreviewBackfillForCatalog(catalog);
+    }
+  })().catch(error => {
+    logger.log('ERROR', 'preview-link', 'Preview-link backfill runner stopped; a later restart will resume it', { error: String(error?.message || error).slice(0, 300) });
+    // Keep this process from repeatedly restarting a failed job every monitor tick. A Render restart resumes it.
+  }).finally(() => { previewBackfillPromise = null; });
+  return previewBackfillPromise;
+}
+
+// Admin-only repair endpoint for records whose preview_link is null, empty, or whitespace.
+// Dry-run is the default. Mutations require { confirm: true } in the POST body.
+let previewRepairRunning = false;
+const PREVIEW_REPAIR_CONCURRENCY = 3;
+const PREVIEW_REPAIR_SCAN_BATCH = 1000;
+
+async function findMissingPreviewRows(catalog, limit = 100) {
+  const table = catalog === 'events' ? 'event_cards' : 'cards';
+  const columns = catalog === 'events' ? 'id,name,image_url,preview_link,event_slug' : 'id,name,image_url,preview_link';
+  const matches = [];
+  let offset = 0;
+  for (;;) {
+    let query = supabase.from(table).select(columns).order('id', { ascending: true }).range(offset, offset + PREVIEW_REPAIR_SCAN_BATCH - 1);
+    const { data, error } = await query;
+    if (error) throw error;
+    const rows = data || [];
+    for (const row of rows) {
+      if (typeof row.preview_link !== 'string' || !row.preview_link.trim()) {
+        matches.push(row);
+        if (matches.length >= limit) return { rows: matches, scanned: offset + rows.length, capped: true };
+      }
+    }
+    offset += rows.length;
+    if (rows.length < PREVIEW_REPAIR_SCAN_BATCH) break;
+  }
+  return { rows: matches, scanned: offset, capped: false };
+}
+
+app.post('/api/admin/preview-links/repair', requireAdmin, async (req, res) => {
+  if (!supabase) return res.status(503).json({ ok: false, error: 'Supabase is not configured.' });
+  if (previewRepairRunning) return res.status(409).json({ ok: false, error: 'A preview-link repair is already running.' });
+
+  const requested = String(req.body?.catalog || 'both').toLowerCase();
+  if (!['cards', 'events', 'both'].includes(requested)) {
+    return res.status(400).json({ ok: false, error: 'catalog must be cards, events, or both.' });
+  }
+  const rawLimit = Number(req.body?.limit ?? 100);
+  const limit = Number.isSafeInteger(rawLimit) && rawLimit > 0 ? Math.min(rawLimit, 500) : 100;
+  const dryRun = req.body?.confirm !== true;
+  const catalogs = requested === 'both' ? ['cards', 'events'] : [requested];
+  previewRepairRunning = true;
+
+  try {
+    const plan = {};
+    for (const catalog of catalogs) {
+      const found = await findMissingPreviewRows(catalog, limit);
+      plan[catalog] = { rows: found.rows, scanned: found.scanned, capped: found.capped };
+    }
+
+    const summary = {};
+    for (const catalog of catalogs) {
+      const { rows, scanned, capped } = plan[catalog];
+      summary[catalog] = {
+        scanned,
+        missingFound: rows.length,
+        capped,
+        dryRun,
+        ...(dryRun ? { sample: rows.slice(0, 25).map(row => ({ id: String(row.id), name: String(row.name || ''), ...(catalog === 'events' ? { event_slug: String(row.event_slug || 'unknown') } : {}) })) } : {})
+      };
+    }
+
+    if (dryRun) {
+      return res.json({
+        ok: true,
+        mode: 'dry-run',
+        message: 'No records changed. Send confirm: true to resolve and save missing preview links.',
+        limitPerCatalog: limit,
+        results: summary,
+        timestamps: getTimestamps(),
+      });
+    }
+
+    const results = {};
+    for (const catalog of catalogs) {
+      const rows = plan[catalog].rows;
+      let succeeded = 0;
+      let failed = 0;
+      const records = [];
+      await mapWithConcurrency(rows, PREVIEW_REPAIR_CONCURRENCY, async row => {
+        const result = await resolveAndSavePreview(catalog, row, { backfill: true });
+        const record = {
+          id: String(row.id),
+          name: String(row.name || ''),
+          catalog,
+          ...(catalog === 'events' ? { event: String(row.event_slug || 'unknown') } : {}),
+        };
+        if (result.ok) {
+          succeeded++;
+          records.push({ ...record, status: result.skipped ? 'skipped' : 'repaired', url: result.url || row.preview_link || null, mediaType: result.type || 'unknown' });
+        } else {
+          failed++;
+          records.push({ ...record, status: 'failed', reason: String(result.reason || 'resolution_failed').slice(0, 200) });
+        }
+      });
+      records.sort((a, b) => rows.findIndex(row => String(row.id) === a.id) - rows.findIndex(row => String(row.id) === b.id));
+      if (succeeded > 0) {
+        if (catalog === 'cards') await rebuildMainStorage();
+        else await rebuildEventStorage();
+      }
+      results[catalog] = {
+        scanned: plan[catalog].scanned,
+        attempted: rows.length,
+        succeeded,
+        failed,
+        capped: plan[catalog].capped,
+        records,
+      };
+    }
+
+    const hasFailures = Object.values(results).some(item => item.failed > 0);
+    logger.log(hasFailures ? 'WARN' : 'SUCCESS', 'preview-link', 'Admin preview-link repair finished', {
+      catalogs, limitPerCatalog: limit, results: Object.fromEntries(Object.entries(results).map(([name, value]) => [name, { attempted: value.attempted, succeeded: value.succeeded, failed: value.failed, capped: value.capped }]))
+    });
+    return res.status(hasFailures ? 207 : 200).json({
+      ok: !hasFailures,
+      mode: 'repair',
+      message: 'Repair pass finished. If capped is true, run another pass to process additional missing records.',
+      limitPerCatalog: limit,
+      results,
+      timestamps: getTimestamps(),
+    });
+  } catch (error) {
+    logger.log('ERROR', 'preview-link', 'Admin preview-link repair failed', { error: String(error?.message || error).slice(0, 300) });
+    return res.status(502).json({ ok: false, error: 'Preview-link repair failed.', detail: String(error?.message || error).slice(0, 300), timestamps: getTimestamps() });
+  } finally {
+    previewRepairRunning = false;
+  }
+});
+
+app.get('/api/link', requireApiKey, async (req, res) => {
+  const startTime = Date.now();
+  const base = () => ({ durationMs: Date.now() - startTime, timestamps: getTimestamps() });
+
+  if (req.query.url === undefined || req.query.url === '') {
+    return res.status(400).json({ ok: false, error: 'Missing url parameter', usage: '/api/link?url=SHOOB_URL&key=YOUR_KEY', ...base() });
+  }
+  const parsed = parseShoobUrl(req.query.url);
+  if (!parsed) {
+    return res.status(400).json({ ok: false, error: 'Invalid Shoob URL', ...base() });
+  }
+
+  try {
+    let mediaUrl;
+    let cardId = null;
+    let cached = false;
+
+    if (parsed.kind === 'media') {
+      mediaUrl = parsed.url; // already the final CDN file
+    } else {
+      cardId = parsed.id;
+      const cacheKey = `${parsed.id}|${parsed.size || ''}`;
+      let savedRow = null;
+      if (supabase) {
+        for (const table of ['cards', 'event_cards']) {
+          const { data, error } = await supabase.from(table).select('id,preview_link').eq('id', parsed.id).maybeSingle();
+          if (error) {
+            logger.log('WARN', 'preview-link', 'Persistent preview lookup failed; falling back to direct Shoob resolution', { cardId: parsed.id, catalog: table === 'cards' ? 'cards' : 'events', error: String(error.message || error).slice(0, 250) });
+            savedRow = null;
+            break;
+          }
+          if (data) { savedRow = { ...data, table }; break; }
+        }
+      }
+      // Use durable catalogue storage for the default/standard preview size. A custom size must resolve directly.
+      if (savedRow?.preview_link && (!parsed.size || parsed.size === 700) && /^https:\/\/cdn\.shoob\.gg\//i.test(savedRow.preview_link)) {
+        mediaUrl = savedRow.preview_link;
+        cached = true;
+        linkCacheSet(cacheKey, mediaUrl);
+      } else {
+        const hit = linkCacheGet(cacheKey);
+        if (hit) {
+          mediaUrl = hit;
+          cached = true;
+        } else {
+          const wait = linkRateCheck(req.ip || 'unknown');
+          if (wait) {
+            res.set('Retry-After', String(wait));
+            return res.status(429).json({ ok: false, error: 'Too many link lookups. Try again shortly.', retry_after_seconds: wait, cached: false, ...base() });
+          }
+          mediaUrl = await resolveShoobCard(parsed.id, parsed.size || 700);
+          linkCacheSet(cacheKey, mediaUrl);
+          if (savedRow && (!parsed.size || parsed.size === 700)) {
+            const { error } = await supabase.from(savedRow.table).update({ preview_link: mediaUrl }).eq('id', parsed.id);
+            if (error) logger.log('WARN', 'preview-link', 'Resolved URL returned but could not be persisted', { cardId: parsed.id, catalog: savedRow.table === 'cards' ? 'cards' : 'events', error: error.message });
+            else logger.log('SUCCESS', 'preview-link', 'Preview link resolved and saved by /api/link', { cardId: parsed.id, catalog: savedRow.table === 'cards' ? 'cards' : 'events', cached: false });
+          }
+        }
+      }
+    }
+
+    const info = describeMedia(mediaUrl);
+    return res.json({ ok: true, card_id: cardId, type: info.type, media: info.media, mime: info.mime, url: mediaUrl, cached, ...base() });
+  } catch (error) {
+    const status = error && error.status ? error.status : 502;
+    const message = error && error.status ? error.message : 'Link lookup failed';
+    return res.status(status).json({ ok: false, error: message, error_code: status === 404 ? 'CARD_NOT_FOUND' : status === 504 ? 'PREVIEW_TIMEOUT' : 'PREVIEW_RESOLUTION_FAILED', retryable: status !== 400 && status !== 404, cached: false, ...base() });
+  }
+});
+
+// END /api/link
+
 app.get('/api/admin/catalog', requireAdmin, async (req, res) => {
   if (!supabase) return res.status(503).json({ ok: false, error: 'Supabase not configured' });
   const { data, error } = await supabase.from('catalog_state').select('*').order('catalog');
@@ -954,57 +1482,122 @@ const PUBLIC_ENDPOINT_DIRECTORY = {
   ok: true,
   service: 'ZCard Control Room',
   documentation: {
-    queryRules: [
-      'Protected endpoints require an API key appended to the URL (e.g., &key=YOUR_KEY).',
-      'Use ? before the first query parameter.',
-      'Use & between additional query parameters.',
-      'Query parameter names are case-sensitive.',
-      'Filters combine using AND logic.',
-      'limit defaults to 20 and cannot exceed 100.',
-      'page defaults to 1.',
-      'search and q are aliases.',
-      'series and anime are aliases.',
-      'event is an exact event slug filter (e.g., summer, gala).',
-      'tier is an exact tier filter.',
-      'sort must be an allowed column for that endpoint.',
-      'order accepts asc or desc (default asc).',
-      'Requesting a page beyond the last page returns ok:true with an empty data array, not an error.'
+    introduction: 'Public API directory for the ZCard Control Room Shoob catalogue service. This directory intentionally excludes admin and internal endpoints.',
+    gettingStarted: [
+      '1. Get an API key from the service owner. The key must be configured in the API_KEYS environment variable; this directory does not issue keys.',
+      '2. For browser testing, append &key=YOUR_API_KEY after the first query parameter, or use ?key=YOUR_API_KEY when it is the first parameter.',
+      '3. For scripts, prefer the x-api-key request header so the key is not placed in a URL. The /api/download route also accepts this header.',
+      '4. Open /api/health to check service/Supabase health, then use /api/cards or /api/events to explore catalogue records.',
+      '5. Replace placeholders such as YOUR_API_KEY and CARD_ID with real values. Never publish API keys or commit them to source control.'
     ],
+    authentication: {
+      requiredFor: ['/api/cards', '/api/events', '/api/random', '/api/series', '/api/link', '/api/download', '/api/stats', '/api/stats/recent'],
+      queryParameter: 'key',
+      recommendedHeader: 'x-api-key',
+      errors: [
+        { status: 401, meaning: 'No API key was supplied.' },
+        { status: 403, meaning: 'A key was supplied, but it is not in the configured API_KEYS list.' },
+        { status: 429, meaning: 'The /api/link uncached lookup rate limit was reached; wait for retry_after_seconds.' }
+      ]
+    },
+    queryRules: [
+      'Use ? before the first query parameter and & between later parameters.',
+      'Query parameter names are case-sensitive.',
+      'For /api/cards and /api/events, limit defaults to 20 and is capped at 100. page defaults to 1. Invalid/non-positive page or limit values fall back to their defaults.',
+      'search and q are aliases for searching card name or series; series and anime are aliases for the series filter.',
+      'tier is an exact-match filter. event is an exact event-slug filter, such as summer, halloween, christmas, chinese-new-year, valentines-day, or gala.',
+      'sort values are restricted per endpoint; unsupported sort values fall back to name. order is asc or desc; any value other than desc is treated as ascending.',
+      'A page beyond the last page returns ok:true with an empty data array.',
+      'byseries=true or byseries=1 adds a series-count breakdown to /api/cards. /api/events accepts byevent=true, byevent=1, or byseries=true/1 for an event-card series/event breakdown.',
+      '/api/random returns one random record from the main cards catalogue only; it does not randomly select from event_cards.',
+      '/api/link accepts a Shoob API card URL, a shoob.gg card page URL containing a 24-character card ID, or a direct https://cdn.shoob.gg/ media URL. The url value should be URL-encoded when it contains its own query parameters.',
+      '/api/link resolves a URL; it does not stream or download the image bytes. The returned media/type may be unknown for extensionless CDN URLs even when the URL serves valid image bytes.',
+      '/api/download returns a generated catalogue JSON attachment. It is not an individual image-download endpoint.',
+      '/api/stats uses Africa/Lagos calendar boundaries and retains about three months of analytics. last_N_weeks and last_N_months refer to completed periods, excluding the current period.',
+      '/api/stats/recent returns aggregate daily rows, not individual request logs. Its limit must be an integer from 1 to 500 (default 50).',
+      'Health checks, admin routes, and internal routes are not documented as public API endpoints. Analytics does not intentionally store API-key/token/password query values, and admin/internal paths are excluded.'
+    ],
+    commonScenarios: [
+      { goal: 'Check whether the service is online', steps: ['Open /api/health or /ping. These routes do not require an API key.', 'Look for ok:true and supabaseReachable:true.'] },
+      { goal: 'Get the first page of regular cards', steps: ['Call /api/cards?key=YOUR_API_KEY.', 'Read count for the total matching records, pages for the page count, and data for the current records.'] },
+      { goal: 'Search for a character or series', steps: ['Use /api/cards?search=naruto&key=YOUR_API_KEY, or use q=naruto.', 'For a series filter, use series=One%20Piece or anime=One%20Piece. Search and series filters can be combined.'] },
+      { goal: 'Find high-tier cards', steps: ['Use /api/cards?tier=S&key=YOUR_API_KEY.', 'tier is an exact match, not a partial search.'] },
+      { goal: 'Browse a seasonal event', steps: ['Use /api/events?event=summer&key=YOUR_API_KEY.', 'The event value must match the event slug exactly. Add page, limit, search, tier, or series to narrow results.'] },
+      { goal: 'Get a random regular card', steps: ['Call /api/random?key=YOUR_API_KEY.', 'Add tier, search/q, or series/anime filters if you want a random card from a narrower matching pool.'] },
+      { goal: 'Count series in a catalogue', steps: ['Call /api/series?key=YOUR_API_KEY for regular cards.', 'Call /api/series?event=summer&key=YOUR_API_KEY for the series breakdown of one event.'] },
+      { goal: 'Resolve a Shoob card link', steps: ['Call /api/link with a URL-encoded Shoob card URL and your API key.', 'Read the returned url field and open that CDN URL to view the media. This endpoint returns JSON metadata, not the media file itself.'] },
+      { goal: 'Download the complete catalogue', steps: ['Open /api/download?file=cards&key=YOUR_API_KEY or /api/download?file=events&key=YOUR_API_KEY in a browser.', 'The response downloads cards.json or events.json. For scripts, send the key in the x-api-key header instead of the URL.'] },
+      { goal: 'Review API usage analytics', steps: ['Call /api/stats?key=YOUR_API_KEY for the summary and daily/weekly/monthly breakdowns.', 'Use daily=true, weekly=true, or monthly=true to request a specific breakdown; add endpoint, method, success, failed, or top to filter the details.'] },
+      { goal: 'Read recent analytics aggregates', steps: ['Call /api/stats/recent?limit=50&key=YOUR_API_KEY.', 'Use limit between 1 and 500. Each item is an aggregate for a day/route/signature, not an individual request.'] }
+    ],
+    responseGuide: {
+      catalogue: 'Catalogue query responses include ok, count, page, limit, pages, filters, durationMs, timestamps, and data. data is an array of card records.',
+      cardFields: 'Common fields include id, name, tier, series, image_url, preview_link, author, and author_link. Event records also include event_slug.',
+      errors: 'Error responses usually include ok:false and error. Some database/source failures use HTTP 502; unavailable storage or configuration may use HTTP 503.',
+      timestamps: 'Most endpoints include UTC and Africa/Lagos timestamps. Analytics calendar calculations use Africa/Lagos.'
+    }
   },
   endpoints: [
-    { method: 'GET', path: '/', description: 'Static frontend.' },
-    { method: 'GET', path: '/api/health', description: 'Health and Supabase availability.' },
-    { method: 'GET', path: '/ping', description: 'Health-check alias.' },
-    { method: 'GET', path: '/api/status', description: 'Public runtime and catalog status.' },
-    { 
-      method: 'GET', path: '/api/random', description: 'Returns one random main-catalog card.', 
-      parameters: { key: 'Required API key (or Admin key).', tier: 'Exact tier match.', search: 'Partial search.', series: 'Partial series match.' }, 
-      examples: ['/api/random?key=YOUR_KEY', '/api/random?tier=S&key=YOUR_KEY'] 
+    { method: 'GET', path: '/', auth: 'None', description: 'Serves the static frontend if the public directory is present.', scenario: 'Open the service homepage.' },
+    { method: 'GET', path: '/api/health', auth: 'None', description: 'Health check showing service name, Supabase configuration/reachability, active scraping jobs, uptime, and Node.js version.', scenario: 'Use for uptime checks; HTTP 200 means the health condition is passing, while HTTP 503 means the service or Supabase is not healthy.' },
+    { method: 'GET', path: '/ping', auth: 'None', description: 'Alias of /api/health.', scenario: 'Use with uptime monitors or simple curl checks.' },
+    { method: 'GET', path: '/api/status', auth: 'None', description: 'Public runtime/catalog status, scheduler state, sync/backfill status, retention/self-ping status, memory use, log-buffer count, and analytics tracker snapshot.', scenario: 'Inspect general service status without using admin routes.' },
+    { method: 'GET', path: '/api/endpoints', auth: 'None', description: 'Full public endpoint directory with beginner guidance, authentication notes, parameters, examples, and common scenarios.', scenario: 'Start here when learning the API.' },
+    { method: 'GET', path: '/api/endpoint', auth: 'None', description: 'Alias of /api/endpoints.', scenario: 'Use if a client or bookmark uses the singular route.' },
+    {
+      method: 'GET', path: '/api/cards', auth: 'API key', description: 'Searches and paginates the regular/main cards catalogue.',
+      parameters: { key: 'Required API key (query parameter or x-api-key header).', page: 'Optional positive integer; default 1.', limit: 'Optional positive integer; default 20, maximum 100.', tier: 'Optional exact tier match.', search: 'Optional partial match against name or series.', q: 'Alias of search.', series: 'Optional partial series match.', anime: 'Alias of series.', sort: 'name, tier, or series; default name.', order: 'asc or desc; default asc.', byseries: 'Set true or 1 to include bySeries counts.' },
+      examples: ['/api/cards?key=YOUR_API_KEY', '/api/cards?page=2&limit=50&key=YOUR_API_KEY', '/api/cards?search=naruto&key=YOUR_API_KEY', '/api/cards?tier=S&sort=name&order=asc&key=YOUR_API_KEY', '/api/cards?byseries=true&key=YOUR_API_KEY'],
+      response: 'JSON object with count, series_count, page, limit, pages, filters, durationMs, timestamps, and data[].'
     },
-    { 
-      method: 'GET', path: '/api/series', description: 'Dictionary of all anime series and counts.', 
-      parameters: { key: 'Required API key (or Admin key).', event: 'Optional event slug.' }, 
-      examples: ['/api/series?key=YOUR_KEY', '/api/series?event=summer&key=YOUR_KEY'] 
+    {
+      method: 'GET', path: '/api/events', auth: 'API key', description: 'Searches and paginates event cards; records include event_slug.',
+      parameters: { key: 'Required API key (query parameter or x-api-key header).', page: 'Optional positive integer; default 1.', limit: 'Optional positive integer; default 20, maximum 100.', event: 'Optional exact event slug.', tier: 'Optional exact tier match.', search: 'Optional partial match against name or series.', q: 'Alias of search.', series: 'Optional partial series match.', anime: 'Alias of series.', sort: 'name, tier, series, or event_slug; default name.', order: 'asc or desc; default asc.', byevent: 'Set true or 1 to include event counts.', byseries: 'Alias that also enables the event_slug count breakdown (returned as byEvent).' },
+      examples: ['/api/events?key=YOUR_API_KEY', '/api/events?event=summer&key=YOUR_API_KEY', '/api/events?event=christmas&search=mami&key=YOUR_API_KEY', '/api/events?page=2&limit=50&key=YOUR_API_KEY', '/api/events?byevent=true&key=YOUR_API_KEY'],
+      response: 'JSON object with count, event_count, page, limit, pages, filters, durationMs, timestamps, and data[].'
     },
-    { 
-      method: 'GET', path: '/api/stats', description: 'API usage analytics.', 
-      parameters: { key: 'Required API key (or Admin key).', daily: 'true', weekly: 'true', monthly: 'true' }, 
-      examples: ['/api/stats?key=YOUR_KEY', '/api/stats?daily=true&key=YOUR_KEY'] 
+    {
+      method: 'GET', path: '/api/random', auth: 'API key', description: 'Returns one randomly selected regular/main-catalog card, optionally from a filtered matching pool.',
+      parameters: { key: 'Required API key.', tier: 'Optional exact tier match.', search: 'Optional partial name/series match.', q: 'Alias of search.', series: 'Optional partial series match.', anime: 'Alias of series.' },
+      examples: ['/api/random?key=YOUR_API_KEY', '/api/random?tier=S&key=YOUR_API_KEY', '/api/random?series=One%20Piece&key=YOUR_API_KEY', '/api/random?search=goku&tier=4&key=YOUR_API_KEY'],
+      response: 'JSON object with pool_size, filters, durationMs, timestamps, and data containing one card. Returns HTTP 404 if no cards match.'
     },
-    { 
-      method: 'GET', path: '/api/cards', description: 'Search and paginate main-catalog cards.', 
-      parameters: { key: 'Required API key (or Admin key).', page: '1', limit: '20', tier: 'Exact match', search: 'Partial match', series: 'Partial match', sort: 'name, tier, series', order: 'asc, desc' }, 
-      examples: ['/api/cards?key=YOUR_KEY', '/api/cards?tier=S&key=YOUR_KEY'] 
+    {
+      method: 'GET', path: '/api/series', auth: 'API key', description: 'Returns the unique series count and a series-to-card-count dictionary. Without event, uses regular cards; with event, uses event cards.',
+      parameters: { key: 'Required API key.', event: 'Optional exact event slug; when present the source table is event_cards.' },
+      examples: ['/api/series?key=YOUR_API_KEY', '/api/series?event=summer&key=YOUR_API_KEY', '/api/series?event=gala&key=YOUR_API_KEY'],
+      response: 'JSON object with total_series, event, source_table, series, durationMs, and timestamps.'
     },
-    { 
-      method: 'GET', path: '/api/events', description: 'Search and paginate event cards.', 
-      parameters: { key: 'Required API key (or Admin key).', event: 'Exact slug', tier: 'Exact match', search: 'Partial match', series: 'Partial match' }, 
-      examples: ['/api/events?event=summer&key=YOUR_KEY'] 
+    {
+      method: 'GET', path: '/api/link', auth: 'API key', description: 'Validates a supported Shoob URL and resolves card URLs to a final CDN media URL. It returns a JSON URL; it does not proxy/download the image bytes.',
+      parameters: { key: 'Required API key.', url: 'Required URL from api.shoob.gg/site/api/cardr/{24-character-card-id}, a shoob.gg card page containing the ID, or cdn.shoob.gg media URL.' },
+      examples: [
+        '/api/link?url=https%3A%2F%2Fapi.shoob.gg%2Fsite%2Fapi%2Fcardr%2FCARD_ID%3Fsize%3D700&key=YOUR_API_KEY',
+        '/api/link?url=https%3A%2F%2Fcdn.shoob.gg%2Fimages%2Feventcards%2F1%2F1605056309192.Christmas%25202020&key=YOUR_API_KEY'
+      ],
+      response: 'JSON object with ok, card_id, type, media, mime, url, cached, durationMs, and timestamps. For extensionless URLs, type/media can be unknown and mime can be null even if the URL serves an image.',
+      limits: 'Uncached lookups are limited to 30 per IP per minute; cached lookups are not counted toward that limit. Cache lifetime is 10 minutes.'
     },
-    { method: 'GET', path: '/api/endpoints', description: 'This directory.' },
+    {
+      method: 'GET', path: '/api/download', auth: 'API key', description: 'Downloads a full generated catalogue JSON attachment from Supabase Storage. This is a catalogue download, not an individual card-image download.',
+      parameters: { key: 'Required API key; use query parameter in a browser or x-api-key header in a script.', file: 'Required; exactly cards or events.' },
+      examples: ['/api/download?file=cards&key=YOUR_API_KEY', '/api/download?file=events&key=YOUR_API_KEY'],
+      response: 'Downloads cards.json or events.json with Content-Disposition: attachment. Invalid file returns HTTP 400; missing file may return HTTP 404; storage/download errors may return HTTP 502.'
+    },
+    {
+      method: 'GET', path: '/api/stats', auth: 'API key', description: 'Returns aggregate API-usage analytics, summary totals, and daily/weekly/monthly breakdowns. Uses Africa/Lagos calendar periods and approximately three months of retained history.',
+      parameters: { key: 'Required API key.', daily: 'true or 1 to include daily breakdown; if no grain flag is enabled, all three breakdowns are returned.', weekly: 'true or 1 to include weekly breakdown.', monthly: 'true or 1 to include monthly breakdown.', endpoint: 'Optional path filter such as /api/cards; can include a supported parameter signature, e.g. /api/cards?tier=S.', method: 'Optional HTTP method filter, e.g. GET.', success: 'true or 1 makes each bucket total reflect successful requests.', failed: 'true or 1 makes each bucket total reflect failed requests.', top: 'Optional number of highest-total buckets to return, clamped to 1–500.' },
+      examples: ['/api/stats?key=YOUR_API_KEY', '/api/stats?daily=true&key=YOUR_API_KEY', '/api/stats?weekly=true&monthly=true&key=YOUR_API_KEY', '/api/stats?endpoint=%2Fapi%2Fcards&method=GET&key=YOUR_API_KEY', '/api/stats?failed=true&top=20&key=YOUR_API_KEY'],
+      response: 'Includes summary totals, window/timezone, filters, generatedAt, and selected daily/weekly/monthly arrays with total, ok, err, avg_time, and max_time.'
+    },
+    {
+      method: 'GET', path: '/api/stats/recent', auth: 'API key', description: 'Returns recent daily aggregate analytics rows ordered newest day first and then highest total. These are aggregate buckets, not request-by-request logs.',
+      parameters: { key: 'Required API key.', limit: 'Optional integer from 1 to 500; default 50.' },
+      examples: ['/api/stats/recent?key=YOUR_API_KEY', '/api/stats/recent?limit=100&key=YOUR_API_KEY'],
+      response: 'JSON object with limit, count, hasMore, window, generatedAt, and recent[]. Each row includes aggregate counts and timing information.'
+    }
   ],
 };
-
 app.get(['/api/endpoints', '/api/endpoint'], (req, res) => {
   res.set('Cache-Control', 'no-store');
   res.json({ ...PUBLIC_ENDPOINT_DIRECTORY, requestedPath: req.path, generatedAt: new Date().toISOString() });
@@ -1039,6 +1632,4 @@ process.on('uncaughtException', e => logger.log('ERROR', 'process', 'Uncaught ex
 process.on('unhandledRejection', e => logger.log('ERROR', 'process', 'Unhandled rejection', { error: e?.message || String(e) }));
 
 // end of server.js
-
-
 
