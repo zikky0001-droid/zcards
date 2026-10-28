@@ -1,10 +1,6 @@
 /**
  * Download Shoob event cards into events.json (grouped by event).
- * Usage:
- *   node events.js
- *   node events.js --event easter
  */
-
 const crypto = require("node:crypto");
 const fs = require("node:fs");
 const path = require("node:path");
@@ -12,8 +8,8 @@ const process = require("node:process");
 const { io } = require("socket.io-client");
 
 const SHOOB_URL = process.env.SHOOB_URL || "https://shoob.gg";
-const REQUEST_TIMEOUT = 60000; // Increased from 30000 to 60000 (60 seconds)
-const PREFLIGHT_TIMEOUT = 10000;
+const REQUEST_TIMEOUT = 60000; // 60 seconds for page requests
+const PREFLIGHT_TIMEOUT = 30000; // Increased from 10s to 30s to prevent cold-start false timeouts
 
 const SHOOB_ENCRYPTION_SECRET =
   "GaTSqvlqTrrWyTFTH2vcbRb7IJq9auX1hVjzN77pvBPp5fxH7OrIfos89P5zDHy82" +
@@ -54,20 +50,9 @@ function normalizeEventCard(raw, eventSlug) {
   const image_url = String(raw.image_url || raw.img || "");
   const author = String(raw.author || "").trim();
   const author_link = String(raw.author_link || "").trim();
-
   if (!id) throw new Error("Event card missing id");
   if (!name) throw new Error(`Event card ${id} missing name`);
-
-  return {
-    id,
-    name,
-    tier,
-    series,
-    event: eventSlug,
-    image_url,
-    author,
-    author_link,
-  };
+  return { id, name, tier, series, event: eventSlug, image_url, author, author_link };
 }
 
 function groupCardsByEvent(cards) {
@@ -127,7 +112,7 @@ class ShoobEventScraper {
             console.warn(`[Retry] ${eventSlug} page ${page} failed (attempt ${attemptNum}/${retries}), retrying in 2s...`);
             setTimeout(() => attempt(attemptNum + 1), 2000);
           } else {
-            rej(new Error(`Timeout for ${eventSlug} page ${page} after ${retries} retries`));
+            rej(new Error(`Timeout for ${eventSlug} page ${page} after ${retries} retries (REQUEST_TIMEOUT=${REQUEST_TIMEOUT}ms)`));
           }
         }, REQUEST_TIMEOUT);
 
@@ -144,7 +129,6 @@ class ShoobEventScraper {
           series: null,
         });
       };
-
       attempt(1);
     });
   }
@@ -152,17 +136,14 @@ class ShoobEventScraper {
   async checkMenu() {
     if (this.menuChecked) return;
     this.menuChecked = true;
-
     const result = await fetchEventMenu();
     if (!result.ok) {
       console.warn(`[Preflight] Event menu could not be verified: ${result.reason}`);
       return;
     }
-
     const knownSet = new Set(this.events.map((e) => e.toLowerCase()));
     const unknown = result.slugs.filter((s) => !knownSet.has(s.toLowerCase()));
     this.unknownEvents = unknown;
-
     if (unknown.length > 0) {
       console.warn(`[Preflight] ${unknown.length} unknown event(s) on menu: ${unknown.join(", ")}`);
       console.warn(`[Preflight] Add them to KNOWN_EVENTS in events.js to scrape them next run.`);
@@ -171,11 +152,21 @@ class ShoobEventScraper {
     }
   }
 
-  async fetchSummary() {
-    await this.checkMenu();
-    const socket = io(SHOOB_URL, { transports: ["websocket"] });
+  fetchSummary() {
+    return new Promise(async (resolve, reject) => {
+      await this.checkMenu();
+      const socket = io(SHOOB_URL, { 
+        transports: ["websocket"],
+        timeout: 20000,
+        reconnection: false 
+      });
+      let lastSocketError = null;
 
-    return new Promise((resolve, reject) => {
+      socket.on("connect_error", (err) => {
+        lastSocketError = err.message || String(err);
+        console.error(`[Socket] connect_error during summary: ${lastSocketError}`);
+      });
+
       socket.on("connect", async () => {
         try {
           const eventTotals = {};
@@ -199,24 +190,35 @@ class ShoobEventScraper {
         }
       });
 
-      socket.on("connect_error", (err) => {
-        reject(new Error(`Socket connection failed: ${err.message}`));
-      });
-
       setTimeout(() => {
-        socket.disconnect();
-        reject(new Error("Socket connection timeout"));
+        if (!socket.connected) {
+          socket.disconnect();
+          const msg = lastSocketError 
+            ? `Socket connection timeout after ${PREFLIGHT_TIMEOUT}ms. Last error: ${lastSocketError}` 
+            : `Socket connection timeout after ${PREFLIGHT_TIMEOUT}ms (no connect_error fired)`;
+          reject(new Error(msg));
+        }
       }, PREFLIGHT_TIMEOUT);
     });
   }
 
   fetchAll() {
-    return new Promise((resolve, reject) => {
-      const socket = io(SHOOB_URL, { transports: ["websocket"] });
+    return new Promise(async (resolve, reject) => {
+      await this.checkMenu();
+      const socket = io(SHOOB_URL, { 
+        transports: ["websocket"],
+        timeout: 20000,
+        reconnection: false 
+      });
+      let lastSocketError = null;
+
+      socket.on("connect_error", (err) => {
+        lastSocketError = err.message || String(err);
+        console.error(`[Socket] connect_error during fetchAll: ${lastSocketError}`);
+      });
 
       socket.on("connect", async () => {
         try {
-          await this.checkMenu();
           const eventTotals = {};
           for (const slug of this.events) {
             const raw = await this._requestPage(socket, slug, 1, 2);
@@ -230,7 +232,7 @@ class ShoobEventScraper {
           }
           this.expectedTotal = Object.values(eventTotals).reduce((a, b) => a + b, 0);
           console.log(`[Discovery] Grand total: ${this.expectedTotal} event cards across ${Object.keys(eventTotals).length} events`);
-
+          
           this.phase = "scraping";
           for (const eventSlug of this.events) {
             const eventTotal = eventTotals[eventSlug];
@@ -242,7 +244,7 @@ class ShoobEventScraper {
             let page = 1;
             let totalPages = null;
             let collectedThisEvent = 0;
-
+            
             while (true) {
               const rawPage = await this._requestPage(socket, eventSlug, page, 2);
               const { docs, totalPages: respPages } = rawPage;
@@ -250,7 +252,7 @@ class ShoobEventScraper {
                 throw new Error(`Invalid response format for ${eventSlug} page ${page}`);
               }
               if (totalPages === null && respPages) totalPages = Number(respPages);
-
+              
               for (const card of docs) {
                 try {
                   const normalized = normalizeEventCard(card, eventSlug);
@@ -263,20 +265,16 @@ class ShoobEventScraper {
                   console.warn(`[Warning] Skipping invalid event card: ${exc.message}`);
                 }
               }
-
-              console.log(
-                `[Event Progress] ${eventSlug} page ${page}: ${collectedThisEvent}/${eventTotal} (total: ${this.cards.length}/${this.expectedTotal})`
-              );
-
+              console.log(`[Event Progress] ${eventSlug} page ${page}: ${collectedThisEvent}/${eventTotal} (total: ${this.cards.length}/${this.expectedTotal})`);
+              
               if (totalPages !== null && page >= totalPages) break;
               if (collectedThisEvent >= eventTotal) break;
               page++;
             }
           }
-
+          
           this.phase = "done";
           socket.disconnect();
-
           if (this.cards.length === 0 && !this.existingKeys) {
             return reject(new Error("Shoob returned 0 event cards"));
           }
@@ -287,13 +285,14 @@ class ShoobEventScraper {
         }
       });
 
-      socket.on("connect_error", (err) => {
-        reject(new Error(`Socket connection failed: ${err.message}`));
-      });
-
       setTimeout(() => {
-        socket.disconnect();
-        reject(new Error("Socket connection timeout"));
+        if (!socket.connected) {
+          socket.disconnect();
+          const msg = lastSocketError 
+            ? `Socket connection timeout after ${PREFLIGHT_TIMEOUT}ms. Last error: ${lastSocketError}` 
+            : `Socket connection timeout after ${PREFLIGHT_TIMEOUT}ms (no connect_error fired)`;
+          reject(new Error(msg));
+        }
       }, PREFLIGHT_TIMEOUT);
     });
   }
@@ -330,5 +329,6 @@ if (require.main === module) {
 }
 
 module.exports = { ShoobEventScraper, groupCardsByEvent, KNOWN_EVENTS };
+
 
 
