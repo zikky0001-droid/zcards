@@ -5,20 +5,16 @@
  *   node events.js --event easter
  */
 
-const crypto = require("node:crypto");
 const fs = require("node:fs");
 const path = require("node:path");
 const process = require("node:process");
 const { io } = require("socket.io-client");
 const logger = require("./logger.js");
+const { extractPage } = require("./cards.js");
 
 const SHOOB_URL = process.env.SHOOB_URL || "https://shoob.gg";
-const REQUEST_TIMEOUT = 60000; // Increased from 30000 to 60000 (60 seconds)
+const REQUEST_TIMEOUT = 30000;
 const PREFLIGHT_TIMEOUT = 10000;
-
-const SHOOB_ENCRYPTION_SECRET =
-  "GaTSqvlqTrrWyTFTH2vcbRb7IJq9auX1hVjzN77pvBPp5fxH7OrIfos89P5zDHy82" +
-  "7NqZ9FqZ8FqZ9FqZ8FqZ9FqZ8FqZ9FqZ8FqZ9FqZ8FqZ9FqZ8FqZ9FqZ8";
 
 const KNOWN_EVENTS = [
   "easter",
@@ -31,21 +27,6 @@ const KNOWN_EVENTS = [
   "spring-festival",
   "anniversary",
 ];
-
-function decryptShoobValue(enc) {
-  if (!enc) return "";
-  try {
-    const buff = Buffer.from(enc, "base64");
-    const secretBuff = Buffer.from(SHOOB_ENCRYPTION_SECRET);
-    const result = Buffer.alloc(buff.length);
-    for (let i = 0; i < buff.length; i++) {
-      result[i] = buff[i] ^ secretBuff[i % secretBuff.length];
-    }
-    return result.toString("utf8");
-  } catch (e) {
-    return "";
-  }
-}
 
 function normalizeEventCard(raw, eventSlug) {
   const id = String(raw._id || raw.id || "");
@@ -116,7 +97,7 @@ class ShoobEventScraper {
     this.eventStats = {};
     this.unknownEvents = [];
     this.menuChecked = false;
-    this.responseEvent = "cardeventindex_response";
+    this.responseEvent = "cardeventindexres";
   }
 
   _requestPage(socket, eventSlug, page, retries = 2) {
@@ -130,9 +111,9 @@ class ShoobEventScraper {
           clearTimeout(timer);
           if (settled) return;
           settled = true;
-          logger.log("INFO", "events-scraper", "Event page response received", {
+          logger.log("DEBUG", "events-scraper", "Event page response received", {
             event: eventSlug, page, attempt: attemptNum, elapsedMs: Date.now() - startedAt,
-            responseType: Array.isArray(payload?.docs) ? "docs-array" : typeof payload
+            encrypted: Array.isArray(payload?.encrypted)
           });
           resolve(payload);
         };
@@ -223,7 +204,8 @@ class ShoobEventScraper {
           const eventTotals = {};
           for (const slug of this.events) {
             const raw = await this._requestPage(socket, slug, 1, 2);
-            const total = Number(raw.total || raw.totalDocs || 0);
+            const parsed = extractPage(raw);
+            const total = Number(parsed.totalDocs || 0);
             if (!total || total <= 0) {
               throw new Error(`Event ${slug} returned 0 cards in discovery`);
             }
@@ -289,7 +271,8 @@ class ShoobEventScraper {
           const eventTotals = {};
           for (const slug of this.events) {
             const raw = await this._requestPage(socket, slug, 1, 2);
-            const total = Number(raw.total || raw.totalDocs || 0);
+            const parsed = extractPage(raw);
+            const total = Number(parsed.totalDocs || 0);
             if (!total || total <= 0) {
               throw new Error(`Event ${slug} returned 0 cards in discovery`);
             }
@@ -314,11 +297,20 @@ class ShoobEventScraper {
 
             while (true) {
               const rawPage = await this._requestPage(socket, eventSlug, page, 2);
-              const { docs, totalPages: respPages } = rawPage;
+              const parsedPage = extractPage(rawPage);
+              const { docs, totalPages: respPages } = parsedPage;
               if (!Array.isArray(docs)) {
                 throw new Error(`Invalid response format for ${eventSlug} page ${page}`);
               }
               if (totalPages === null && respPages) totalPages = Number(respPages);
+              if (docs.length === 0) {
+                if (collectedThisEvent < eventTotal) {
+                  logger.log("WARN", "events-scraper", "Event page was empty before expected total was reached", {
+                    event: eventSlug, page, collected: collectedThisEvent, expected: eventTotal
+                  });
+                }
+                break;
+              }
 
               for (const card of docs) {
                 try {
