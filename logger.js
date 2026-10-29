@@ -36,15 +36,29 @@ function log(level, component, message, details = {}) {
   if (entry.level === 'ERROR') console.error(line);
   else if (entry.level === 'WARN') console.warn(line);
   else console.log(line);
-  if (persistLog) Promise.resolve().then(() => persistLog(entry)).catch(() => {});
+  if (persistLog) {
+    Promise.resolve()
+      .then(() => persistLog(entry))
+      .catch((error) => {
+        // Use console directly to avoid a recursive persistence failure loop.
+        console.warn(JSON.stringify({
+          level: 'WARN',
+          component: 'logger',
+          message: 'Structured log persistence failed',
+          details: { error: sanitizeString(error?.message || String(error)).slice(0, 500) },
+          timestamp: new Date().toISOString()
+        }));
+      });
+  }
   return entry;
 }
 
 function sanitizeString(input) {
   return String(input)
     .replace(/(Bearer\s+)[A-Za-z0-9._~+\/-]+=*/gi, '$1[REDACTED]')
+    .replace(/([?&](?:api[_-]?key|key|access[_-]?token|refresh[_-]?token|token|secret|password)=)[^&#\s]+/gi, '$1[REDACTED]')
     .replace(/(service[_-]?role[_-]?key\s*[:=]\s*)[^\s,;]+/gi, '$1[REDACTED]')
-    .replace(/((?:api[_-]?key|access[_-]?token|refresh[_-]?token|secret|password)\s*[:=]\s*)[^\s,;]+/gi, '$1[REDACTED]');
+    .replace(/((?:api[_-]?key|\bkey|access[_-]?token|refresh[_-]?token|secret|password)\s*[:=]\s*)[^\s,;]+/gi, '$1[REDACTED]');
 }
 
 function sanitize(value, depth = 0) {

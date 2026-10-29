@@ -10,6 +10,7 @@ const fs = require("node:fs");
 const path = require("node:path");
 const process = require("node:process");
 const { io } = require("socket.io-client");
+const logger = require("./logger.js");
 
 const SHOOB_URL = process.env.SHOOB_URL || "https://shoob.gg";
 const REQUEST_TIMEOUT = 60000; // Increased from 30000 to 60000 (60 seconds)
@@ -119,29 +120,46 @@ class ShoobEventScraper {
   }
 
   _requestPage(socket, eventSlug, page, retries = 2) {
-    return new Promise((res, rej) => {
+    const startedAt = Date.now();
+    return new Promise((resolve, reject) => {
+      let settled = false;
+      let retryTimer = null;
       const attempt = (attemptNum) => {
+        if (settled) return;
+        const onResponse = (payload) => {
+          clearTimeout(timer);
+          if (settled) return;
+          settled = true;
+          logger.log("INFO", "events-scraper", "Event page response received", {
+            event: eventSlug, page, attempt: attemptNum, elapsedMs: Date.now() - startedAt,
+            responseType: Array.isArray(payload?.docs) ? "docs-array" : typeof payload
+          });
+          resolve(payload);
+        };
         const timer = setTimeout(() => {
-          socket.off(this.responseEvent);
+          socket.off(this.responseEvent, onResponse);
+          logger.log("WARN", "events-scraper", "Event page response timed out", {
+            event: eventSlug, page, attempt: attemptNum, maxAttempts: retries,
+            timeoutMs: REQUEST_TIMEOUT
+          });
           if (attemptNum < retries) {
-            console.warn(`[Retry] ${eventSlug} page ${page} failed (attempt ${attemptNum}/${retries}), retrying in 2s...`);
-            setTimeout(() => attempt(attemptNum + 1), 2000);
-          } else {
-            rej(new Error(`Timeout for ${eventSlug} page ${page} after ${retries} retries`));
+            console.warn(`[Retry] ${eventSlug} page ${page} timed out (attempt ${attemptNum}/${retries}), retrying in 2s...`);
+            logger.log("WARN", "events-scraper", "Retrying event page request", {
+              event: eventSlug, page, nextAttempt: attemptNum + 1, maxAttempts: retries, delayMs: 2000
+            });
+            retryTimer = setTimeout(() => attempt(attemptNum + 1), 2000);
+          } else if (!settled) {
+            settled = true;
+            reject(new Error(`Timeout for ${eventSlug} page ${page} after ${retries} attempts`));
           }
         }, REQUEST_TIMEOUT);
 
-        socket.once(this.responseEvent, (payload) => {
-          clearTimeout(timer);
-          res(payload);
+        socket.once(this.responseEvent, onResponse);
+        logger.log("DEBUG", "events-scraper", "Requesting event page", {
+          event: eventSlug, page, attempt: attemptNum, timeoutMs: REQUEST_TIMEOUT
         });
-
         socket.emit("cardeventindex", {
-          page,
-          category: null,
-          event: eventSlug,
-          search: "",
-          series: null,
+          page, category: null, event: eventSlug, search: "", series: null,
         });
       };
 
@@ -173,10 +191,34 @@ class ShoobEventScraper {
 
   async fetchSummary() {
     await this.checkMenu();
-    const socket = io(SHOOB_URL, { transports: ["websocket"] });
+    const startedAt = Date.now();
+    logger.log("INFO", "events-scraper", "Starting event summary discovery", {
+      source: SHOOB_URL, eventCount: this.events.length,
+      connectTimeoutMs: PREFLIGHT_TIMEOUT, requestTimeoutMs: REQUEST_TIMEOUT
+    });
+    const socket = io(SHOOB_URL, { transports: ["websocket"], reconnection: false, timeout: PREFLIGHT_TIMEOUT });
 
     return new Promise((resolve, reject) => {
-      socket.on("connect", async () => {
+      let settled = false;
+      const finish = (fn, value) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(connectTimer);
+        socket.disconnect();
+        fn(value);
+      };
+      const connectTimer = setTimeout(() => {
+        logger.log("ERROR", "events-scraper", "Socket connection timed out during summary discovery", {
+          timeoutMs: PREFLIGHT_TIMEOUT, elapsedMs: Date.now() - startedAt
+        });
+        finish(reject, new Error("Socket connection timeout"));
+      }, PREFLIGHT_TIMEOUT);
+
+      socket.once("connect", async () => {
+        clearTimeout(connectTimer);
+        logger.log("SUCCESS", "events-scraper", "Socket connected for event summary", {
+          elapsedMs: Date.now() - startedAt, transport: socket.io?.engine?.transport?.name || "unknown"
+        });
         try {
           const eventTotals = {};
           for (const slug of this.events) {
@@ -191,30 +233,57 @@ class ShoobEventScraper {
           }
           this.expectedTotal = Object.values(eventTotals).reduce((a, b) => a + b, 0);
           console.log(`[Discovery] Grand total: ${this.expectedTotal} event cards across ${Object.keys(eventTotals).length} events`);
-          socket.disconnect();
-          resolve({ ok: true, byEvent: eventTotals, menuChecked: true, unknownEvents: this.unknownEvents });
+          logger.log("SUCCESS", "events-scraper", "Event summary discovery completed", {
+            total: this.expectedTotal, eventCount: Object.keys(eventTotals).length,
+            elapsedMs: Date.now() - startedAt
+          });
+          finish(resolve, { ok: true, total: this.expectedTotal, byEvent: eventTotals, menuChecked: true, unknownEvents: this.unknownEvents });
         } catch (err) {
-          socket.disconnect();
-          reject(err);
+          logger.log("ERROR", "events-scraper", "Event summary discovery failed", {
+            error: err?.message || String(err), elapsedMs: Date.now() - startedAt
+          });
+          finish(reject, err);
         }
       });
 
-      socket.on("connect_error", (err) => {
-        reject(new Error(`Socket connection failed: ${err.message}`));
+      socket.once("connect_error", (err) => {
+        logger.log("ERROR", "events-scraper", "Socket connection failed during event summary discovery", {
+          error: err?.message || String(err), elapsedMs: Date.now() - startedAt
+        });
+        finish(reject, new Error(`Socket connection failed: ${err.message}`));
       });
-
-      setTimeout(() => {
-        socket.disconnect();
-        reject(new Error("Socket connection timeout"));
-      }, PREFLIGHT_TIMEOUT);
     });
   }
 
   fetchAll() {
+    const startedAt = Date.now();
+    logger.log("INFO", "events-scraper", "Starting event-card scrape", {
+      source: SHOOB_URL, eventCount: this.events.length,
+      connectTimeoutMs: PREFLIGHT_TIMEOUT, requestTimeoutMs: REQUEST_TIMEOUT,
+      existingKeyCount: this.existingKeys?.size ?? null
+    });
     return new Promise((resolve, reject) => {
-      const socket = io(SHOOB_URL, { transports: ["websocket"] });
+      const socket = io(SHOOB_URL, { transports: ["websocket"], reconnection: false, timeout: PREFLIGHT_TIMEOUT });
+      let settled = false;
+      const finish = (fn, value) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(connectTimer);
+        socket.disconnect();
+        fn(value);
+      };
+      const connectTimer = setTimeout(() => {
+        logger.log("ERROR", "events-scraper", "Socket connection timed out during event scrape", {
+          timeoutMs: PREFLIGHT_TIMEOUT, elapsedMs: Date.now() - startedAt
+        });
+        finish(reject, new Error("Socket connection timeout"));
+      }, PREFLIGHT_TIMEOUT);
 
-      socket.on("connect", async () => {
+      socket.once("connect", async () => {
+        clearTimeout(connectTimer);
+        logger.log("SUCCESS", "events-scraper", "Socket connected for event scrape", {
+          elapsedMs: Date.now() - startedAt, transport: socket.io?.engine?.transport?.name || "unknown"
+        });
         try {
           await this.checkMenu();
           const eventTotals = {};
@@ -275,26 +344,29 @@ class ShoobEventScraper {
           }
 
           this.phase = "done";
-          socket.disconnect();
-
           if (this.cards.length === 0 && !this.existingKeys) {
-            return reject(new Error("Shoob returned 0 event cards"));
+            return finish(reject, new Error("Shoob returned 0 event cards"));
           }
-          resolve(this.cards);
+          logger.log("SUCCESS", "events-scraper", "Event-card scrape completed", {
+            collected: this.cards.length, expected: this.expectedTotal,
+            elapsedMs: Date.now() - startedAt, eventCount: this.events.length
+          });
+          finish(resolve, this.cards);
         } catch (err) {
-          socket.disconnect();
-          reject(err);
+          logger.log("ERROR", "events-scraper", "Event-card scrape failed", {
+            error: err?.message || String(err), collected: this.cards.length,
+            expected: this.expectedTotal, phase: this.phase, elapsedMs: Date.now() - startedAt
+          });
+          finish(reject, err);
         }
       });
 
-      socket.on("connect_error", (err) => {
-        reject(new Error(`Socket connection failed: ${err.message}`));
+      socket.once("connect_error", (err) => {
+        logger.log("ERROR", "events-scraper", "Socket connection failed during event scrape", {
+          error: err?.message || String(err), elapsedMs: Date.now() - startedAt
+        });
+        finish(reject, new Error(`Socket connection failed: ${err.message}`));
       });
-
-      setTimeout(() => {
-        socket.disconnect();
-        reject(new Error("Socket connection timeout"));
-      }, PREFLIGHT_TIMEOUT);
     });
   }
 }

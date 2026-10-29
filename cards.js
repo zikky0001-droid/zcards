@@ -17,6 +17,7 @@ const fs = require("node:fs");
 const path = require("node:path");
 const process = require("node:process");
 const { io } = require("socket.io-client");
+const logger = require("./logger.js");
 
 const SHOOB_URL = process.env.SHOOB_URL || "https://shoob.gg";
 const REQUEST_TIMEOUT = 60000; // milliseconds
@@ -155,28 +156,62 @@ class ShoobCardScraper {
   }
 
   async fetchSummary() {
+    const startedAt = Date.now();
+    logger.log("INFO", "cards-scraper", "Checking Shoob card summary", {
+      source: SHOOB_URL, category: this.category, timeoutMs: REQUEST_TIMEOUT
+    });
     const socket = io(SHOOB_URL, { transports: ["websocket"], reconnection: false, timeout: REQUEST_TIMEOUT });
     return new Promise((resolve, reject) => {
-      const fail = (err) => { socket.disconnect(); reject(err instanceof Error ? err : new Error(String(err))); };
+      let settled = false;
+      const fail = (err) => {
+        if (settled) return;
+        settled = true;
+        socket.disconnect();
+        logger.log("ERROR", "cards-scraper", "Card summary request failed", {
+          error: err?.message || String(err), elapsedMs: Date.now() - startedAt, category: this.category
+        });
+        reject(err instanceof Error ? err : new Error(String(err)));
+      };
       socket.once("connect_error", (err) => fail(new Error(`Socket connection error: ${err.message}`)));
       socket.once("connect", async () => {
+        logger.log("INFO", "cards-scraper", "Socket connected for card summary", {
+          elapsedMs: Date.now() - startedAt, transport: socket.io?.engine?.transport?.name || "unknown"
+        });
         try {
           const raw = await new Promise((res, rej) => {
-            const timer = setTimeout(() => { socket.off(this.responseEvent); rej(new Error("Timed out checking Shoob's published card count")); }, REQUEST_TIMEOUT);
-            socket.once(this.responseEvent, payload => { clearTimeout(timer); res(payload); });
+            const onResponse = payload => { clearTimeout(timer); res(payload); };
+            const timer = setTimeout(() => {
+              socket.off(this.responseEvent, onResponse);
+              logger.log("ERROR", "cards-scraper", "Timed out waiting for card summary response", {
+                timeoutMs: REQUEST_TIMEOUT, event: this.responseEvent, category: this.category
+              });
+              rej(new Error("Timed out checking Shoob's published card count"));
+            }, REQUEST_TIMEOUT);
+            socket.once(this.responseEvent, onResponse);
             socket.emit("cardindex", { page: 1, category: this.category, search: "", series: null });
           });
           const parsed = extractPage(raw);
           if (!Number.isFinite(parsed.totalDocs) || parsed.totalDocs < 1) throw new Error("Shoob did not return a trustworthy published total; sync aborted safely");
           this.expectedTotal = parsed.totalDocs;
           socket.disconnect();
-          resolve({ total: parsed.totalDocs, firstPageCount: parsed.docs.length });
+          if (!settled) {
+            settled = true;
+            logger.log("SUCCESS", "cards-scraper", "Card summary received", {
+              total: parsed.totalDocs, firstPageCount: parsed.docs.length, elapsedMs: Date.now() - startedAt
+            });
+            resolve({ total: parsed.totalDocs, firstPageCount: parsed.docs.length });
+          }
         } catch (err) { fail(err); }
       });
     });
   }
 
   async fetchAll() {
+    const startedAt = Date.now();
+    logger.log("INFO", "cards-scraper", "Starting card scrape", {
+      source: SHOOB_URL, category: this.category, timeoutMs: REQUEST_TIMEOUT,
+      existingIdCount: this.existingIds?.size ?? null
+    });
     console.log(`[Shoob Scraper] Connecting to ${SHOOB_URL}...`);
 
     const socket = io(SHOOB_URL, {
@@ -186,12 +221,18 @@ class ShoobCardScraper {
     });
 
     return new Promise((resolve, reject) => {
-      socket.on("connect_error", (err) => {
+      socket.once("connect_error", (err) => {
         socket.disconnect();
+        logger.log("ERROR", "cards-scraper", "Socket connection failed", {
+          error: err?.message || String(err), elapsedMs: Date.now() - startedAt
+        });
         reject(new Error(`Socket connection error: ${err.message}`));
       });
 
-      socket.on("connect", async () => {
+      socket.once("connect", async () => {
+        logger.log("SUCCESS", "cards-scraper", "Socket connected", {
+          elapsedMs: Date.now() - startedAt, transport: socket.io?.engine?.transport?.name || "unknown"
+        });
         console.log("[Shoob Scraper] Connected. Fetching cards...");
         try {
           let page = 1;
@@ -200,15 +241,20 @@ class ShoobCardScraper {
 
           while (true) {
             const rawPage = await new Promise((resPage, rejPage) => {
+              const onResponse = (payload) => {
+                clearTimeout(timer);
+                resPage(payload);
+              };
               const timer = setTimeout(() => {
-                socket.off(this.responseEvent);
+                socket.off(this.responseEvent, onResponse);
+                logger.log("ERROR", "cards-scraper", "Card page response timed out", {
+                  page, timeoutMs: REQUEST_TIMEOUT, event: this.responseEvent,
+                  collected: this.cards.length, expected: this.expectedTotal
+                });
                 rejPage(new Error(`No cardindexres response received for page ${page}`));
               }, REQUEST_TIMEOUT);
 
-              socket.once(this.responseEvent, (payload) => {
-                clearTimeout(timer);
-                resPage(payload);
-              });
+              socket.once(this.responseEvent, onResponse);
 
               socket.emit("cardindex", {
                 page,
@@ -246,6 +292,10 @@ class ShoobCardScraper {
             console.log(
               `[Progress] Downloaded page ${page}: +${newCardsAdded} cards (Total cards collected: ${this.cards.length}${targetTotalStr})`
             );
+            logger.log("INFO", "cards-scraper", "Card page processed", {
+              page, received: docs.length, added: newCardsAdded, collected: this.cards.length,
+              expected: totalDocs, totalPages
+            });
 
             if (totalPages !== null && page >= totalPages) break;
             if (totalDocs !== null && this.cards.length >= totalDocs) break;
@@ -259,9 +309,17 @@ class ShoobCardScraper {
             return reject(new Error("Shoob returned 0 cards; output file was not changed"));
           }
 
+          logger.log("SUCCESS", "cards-scraper", "Card scrape completed", {
+            collected: this.cards.length, expected: this.expectedTotal,
+            elapsedMs: Date.now() - startedAt, category: this.category
+          });
           resolve(this.cards);
         } catch (err) {
           socket.disconnect();
+          logger.log("ERROR", "cards-scraper", "Card scrape failed", {
+            error: err?.message || String(err), collected: this.cards.length,
+            expected: this.expectedTotal, elapsedMs: Date.now() - startedAt
+          });
           reject(err);
         }
       });

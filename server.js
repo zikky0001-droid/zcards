@@ -1592,7 +1592,7 @@ const PUBLIC_ENDPOINT_DIRECTORY = {
   ok: true,
   service: 'ZCard Control Room',
   documentation: {
-    introduction: 'Public API directory for the ZCard Control Room Shoob catalogue service. This directory intentionally excludes admin and internal endpoints.',
+    introduction: 'Public API directory for the ZCard Control Room Shoob catalogue service.',
     gettingStarted: [
       '1. Get an API key from the service owner. The key must be configured in the API_KEYS environment variable; this directory does not issue keys.',
       '2. For browser testing, append &key=YOUR_API_KEY after the first query parameter, or use ?key=YOUR_API_KEY when it is the first parameter.',
@@ -1625,7 +1625,7 @@ const PUBLIC_ENDPOINT_DIRECTORY = {
       '/api/download returns a generated catalogue JSON attachment. It is not an individual image-download endpoint.',
       '/api/stats uses Africa/Lagos calendar boundaries and retains about three months of analytics. last_N_weeks and last_N_months refer to completed periods, excluding the current period.',
       '/api/stats/recent returns aggregate daily rows, not individual request logs. Its limit must be an integer from 1 to 500 (default 50).',
-      'Health checks, admin routes, and internal routes are not documented as public API endpoints. Analytics does not intentionally store API-key/token/password query values, and admin/internal paths are excluded.'
+      'Analytics does not intentionally store API-key/token/password query values.'
     ],
     commonScenarios: [
       { goal: 'Check whether the service is online', steps: ['Open /api/health or /ping. These routes do not require an API key.', 'Look for ok:true and supabaseReachable:true.'] },
@@ -1651,7 +1651,7 @@ const PUBLIC_ENDPOINT_DIRECTORY = {
     { method: 'GET', path: '/', auth: 'None', description: 'Serves the static frontend if the public directory is present.', scenario: 'Open the service homepage.' },
     { method: 'GET', path: '/api/health', auth: 'None', description: 'Health check showing service name, Supabase configuration/reachability, active scraping jobs, uptime, and Node.js version.', scenario: 'Use for uptime checks; HTTP 200 means the health condition is passing, while HTTP 503 means the service or Supabase is not healthy.' },
     { method: 'GET', path: '/ping', auth: 'None', description: 'Alias of /api/health.', scenario: 'Use with uptime monitors or simple curl checks.' },
-    { method: 'GET', path: '/api/status', auth: 'None', description: 'Public runtime/catalog status, scheduler state, sync/backfill status, retention/self-ping status, memory use, log-buffer count, and analytics tracker snapshot.', scenario: 'Inspect general service status without using admin routes.' },
+    { method: 'GET', path: '/api/status', auth: 'None', description: 'Public runtime/catalog status, scheduler state, sync status, memory use, log-buffer count, and analytics tracker snapshot.', scenario: 'Inspect general service status.' },
     { method: 'GET', path: '/api/endpoints', auth: 'None', description: 'Full public endpoint directory with beginner guidance, authentication notes, parameters, examples, and common scenarios.', scenario: 'Start here when learning the API.' },
     { method: 'GET', path: '/api/endpoint', auth: 'None', description: 'Alias of /api/endpoints.', scenario: 'Use if a client or bookmark uses the singular route.' },
     {
