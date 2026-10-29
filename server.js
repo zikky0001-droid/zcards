@@ -1142,7 +1142,7 @@ function sourceCardUrl(row) {
 async function resolveAndSavePreview(catalog, row, { backfill = false } = {}) {
   const table = catalog === 'cards' ? 'cards' : 'event_cards';
   const label = catalog === 'events' ? { event: row.event_slug || 'unknown' } : {};
-  const already = typeof row.preview_link === 'string' && row.preview_link.startsWith('https://cdn.shoob.gg/');
+  const already = hasValidPreviewLink(row.preview_link);
   if (already) return { ok: true, cached: true, skipped: true };
   const source = sourceCardUrl(row);
   if (!source) {
@@ -1174,6 +1174,48 @@ async function resolveAndSavePreview(catalog, row, { backfill = false } = {}) {
   }
 }
 
+function hasValidPreviewLink(value) {
+  if (typeof value !== 'string' || !value.startsWith('https://cdn.shoob.gg/')) return false;
+  try {
+    const url = new URL(value);
+    return url.protocol === 'https:' &&
+      url.hostname.toLowerCase() === 'cdn.shoob.gg' &&
+      !url.username && !url.password && !url.port;
+  } catch {
+    return false;
+  }
+}
+
+async function inspectPreviewLinkCompleteness(catalog) {
+  const table = catalog === 'cards' ? 'cards' : 'event_cards';
+  const pageSize = 1000;
+  let offset = 0;
+  let total = 0;
+  let valid = 0;
+  let invalid = 0;
+
+  for (;;) {
+    const { data, error } = await supabase
+      .from(table)
+      .select('id,preview_link')
+      .order('id', { ascending: true })
+      .range(offset, offset + pageSize - 1);
+    if (error) throw error;
+
+    const rows = data || [];
+    total += rows.length;
+    for (const row of rows) {
+      if (hasValidPreviewLink(row.preview_link)) valid++;
+      else invalid++;
+    }
+
+    offset += rows.length;
+    if (rows.length < pageSize) break;
+  }
+
+  return { total, valid, invalid, complete: invalid === 0 };
+}
+
 async function persistBackfillState(catalog, patch) {
   const current = await readCatalogMetadata(catalog);
   const prior = current.preview_link_backfill && typeof current.preview_link_backfill === 'object' ? current.preview_link_backfill : {};
@@ -1189,24 +1231,57 @@ async function persistBackfillState(catalog, patch) {
 
 async function runPreviewBackfillForCatalog(catalog) {
   const table = catalog === 'cards' ? 'cards' : 'event_cards';
-  let metadata = await readCatalogMetadata(catalog);
-  let job = metadata.preview_link_backfill || {};
-  if (job.completed === true) {
-    state.previewLinkBackfill[catalog] = {
-      status: 'completed', completed: true, processed: Number(job.processed || 0), succeeded: Number(job.succeeded || 0),
-      failed: Number(job.failed || 0), cursor: job.cursor || null, startedAt: job.started_at || null, finishedAt: job.finished_at || null, lastError: null,
-    };
-    logger.log('INFO', 'preview-link', 'One-time preview-link backfill already completed; skipping', { catalog, processed: Number(job.processed || 0), failed: Number(job.failed || 0) });
+
+  // Always verify the live database on startup. The previous job's failed count is historical;
+  // it must not be treated as the current completeness result.
+  let audit;
+  try {
+    audit = await inspectPreviewLinkCompleteness(catalog);
+  } catch (error) {
+    logger.log('ERROR', 'preview-link', 'Could not verify preview-link completeness', {
+      catalog, error: String(error?.message || error).slice(0, 300),
+    });
+    throw error;
+  }
+
+  if (audit.complete) {
+    const finishedAt = new Date().toISOString();
+    await persistBackfillState(catalog, {
+      status: 'completed',
+      completed: true,
+      started_at: finishedAt,
+      finished_at: finishedAt,
+      processed: audit.total,
+      succeeded: audit.valid,
+      failed: 0,
+      cursor: null,
+      last_error: null,
+      verification: { total: audit.total, valid: audit.valid, invalid: 0, checked_at: finishedAt },
+    });
+    logger.log('SUCCESS', 'preview-link', 'Preview links verified; backfill skipped', {
+      catalog, processed: audit.total, succeeded: audit.valid, failed: 0,
+      invalid: 0, checkedAt: finishedAt,
+      note: 'Every database record has an HTTPS preview link on cdn.shoob.gg.',
+    });
     return;
   }
 
-  const startedAt = job.started_at || new Date().toISOString();
-  let processed = Number(job.processed || 0);
-  let succeeded = Number(job.succeeded || 0);
-  let failed = Number(job.failed || 0);
-  let cursor = job.cursor || null;
-  await persistBackfillState(catalog, { status: 'running', completed: false, started_at: startedAt, finished_at: null, processed, succeeded, failed, cursor, last_error: null });
-  logger.log('INFO', 'preview-link', 'One-time preview-link backfill started/resumed', { catalog, processed, succeeded, failed, cursor, batchSize: PREVIEW_BACKFILL_BATCH, concurrency: PREVIEW_BACKFILL_CONCURRENCY });
+  // Incomplete means start from the beginning, not from a stale cursor, so earlier records
+  // that have become invalid since the last run are not missed.
+  const startedAt = new Date().toISOString();
+  let processed = 0;
+  let succeeded = 0;
+  let failed = 0;
+  let cursor = null;
+  await persistBackfillState(catalog, {
+    status: 'running', completed: false, started_at: startedAt, finished_at: null,
+    processed, succeeded, failed, cursor, last_error: null,
+    verification: { total: audit.total, valid: audit.valid, invalid: audit.invalid, checked_at: new Date().toISOString() },
+  });
+  logger.log('WARN', 'preview-link', 'Preview-link verification found incomplete records; starting repair scan', {
+    catalog, total: audit.total, valid: audit.valid, invalid: audit.invalid,
+    batchSize: PREVIEW_BACKFILL_BATCH, concurrency: PREVIEW_BACKFILL_CONCURRENCY,
+  });
 
   try {
     for (;;) {
@@ -1217,37 +1292,72 @@ async function runPreviewBackfillForCatalog(catalog) {
       if (error) throw error;
       const rows = data || [];
       if (!rows.length) break;
+
       let batchSucceeded = 0;
       let batchFailed = 0;
       await mapWithConcurrency(rows, PREVIEW_BACKFILL_CONCURRENCY, async row => {
-        if (typeof row.preview_link === 'string' && row.preview_link.startsWith('https://cdn.shoob.gg/')) {
+        if (hasValidPreviewLink(row.preview_link)) {
           batchSucceeded++;
           return;
         }
         const result = await resolveAndSavePreview(catalog, row, { backfill: true });
-        if (result.ok) batchSucceeded++;
+        if (result.ok && hasValidPreviewLink(result.url || row.preview_link)) batchSucceeded++;
         else batchFailed++;
       });
+
       processed += rows.length;
       succeeded += batchSucceeded;
       failed += batchFailed;
       cursor = String(rows[rows.length - 1].id);
-      await persistBackfillState(catalog, { status: 'running', completed: false, started_at: startedAt, processed, succeeded, failed, cursor, last_error: null });
-      logger.log('INFO', 'preview-link', 'Preview-link backfill progress', { catalog, processed, succeeded, failed, lastCardId: cursor, batchSize: rows.length });
+      await persistBackfillState(catalog, {
+        status: 'running', completed: false, started_at: startedAt,
+        processed, succeeded, failed, cursor, last_error: null,
+      });
+      logger.log('INFO', 'preview-link', 'Preview-link backfill progress', {
+        catalog, processed, succeeded, failed, lastCardId: cursor, batchSize: rows.length,
+      });
     }
 
-    // Publish the populated preview_link values into the downloadable JSON snapshot before marking done.
+    // Publish the database-backed snapshot before recording the final state.
     if (catalog === 'cards') await rebuildMainStorage();
     else await rebuildEventStorage();
+
+    // Verify again after repairs so the final status reflects the current database, not
+    // just the number of resolver attempts.
+    const finalAudit = await inspectPreviewLinkCompleteness(catalog);
     const finishedAt = new Date().toISOString();
-    await persistBackfillState(catalog, { status: failed ? 'completed_with_failures' : 'completed', completed: true, started_at: startedAt, finished_at: finishedAt, processed, succeeded, failed, cursor, last_error: null });
-    logger.log(failed ? 'WARN' : 'SUCCESS', 'preview-link', 'One-time preview-link backfill finished', {
-      catalog, completed: true, processed, succeeded, failed, startedAt, finishedAt,
-      note: failed ? 'Scan completed; unresolved records remain blank and are not automatically rescanned by this one-time job.' : 'All scanned records have a saved preview link or were already resolved.',
+    const finalFailed = finalAudit.invalid;
+    await persistBackfillState(catalog, {
+      status: finalAudit.complete ? 'completed' : 'completed_with_failures',
+      completed: finalAudit.complete,
+      started_at: startedAt,
+      finished_at: finishedAt,
+      processed: finalAudit.total,
+      succeeded: finalAudit.valid,
+      failed: finalFailed,
+      cursor,
+      last_error: null,
+      verification: { total: finalAudit.total, valid: finalAudit.valid, invalid: finalAudit.invalid, checked_at: finishedAt },
+    });
+    logger.log(finalAudit.complete ? 'SUCCESS' : 'WARN', 'preview-link', finalAudit.complete
+      ? 'Preview links verified; backfill finished'
+      : 'Preview-link backfill finished with unresolved records', {
+      catalog, completed: finalAudit.complete, processed: finalAudit.total,
+      succeeded: finalAudit.valid, failed: finalFailed, startedAt, finishedAt,
+      note: finalAudit.complete
+        ? 'Every database record has an HTTPS preview link on cdn.shoob.gg.'
+        : 'Some records still have missing or invalid preview links and will be checked again after restart.',
     });
   } catch (error) {
-    await persistBackfillState(catalog, { status: 'failed', completed: false, started_at: startedAt, processed, succeeded, failed, cursor, last_error: String(error?.message || error).slice(0, 500) }).catch(() => {});
-    logger.log('ERROR', 'preview-link', 'Preview-link backfill interrupted; it will resume after restart', { catalog, processed, succeeded, failed, cursor, error: String(error?.message || error).slice(0, 300) });
+    await persistBackfillState(catalog, {
+      status: 'failed', completed: false, started_at: startedAt,
+      processed, succeeded, failed, cursor,
+      last_error: String(error?.message || error).slice(0, 500),
+    }).catch(() => {});
+    logger.log('ERROR', 'preview-link', 'Preview-link backfill interrupted; it will be checked again after restart', {
+      catalog, processed, succeeded, failed, cursor,
+      error: String(error?.message || error).slice(0, 300),
+    });
     throw error;
   }
 }
